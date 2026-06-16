@@ -44,18 +44,27 @@ Item {
         property bool   cullByAge:       false    // remove points older than cullAgeMinutes
         property int    cullAgeMinutes:  1440     // age cutoff in minutes (default 1 day) when cullByAge is on
 
-        // ── Auto-fill field on new features ───────────────────────────────
-        property bool   incidentRefEnabled: false  // write incidentRefExpr into incidentRefField on new features
+        // ── Session tag ───────────────────────────────────────────────────
+        property bool   incidentRefEnabled: false  // write sessionTag into incidentRefField on new features
+        property bool   useDisplayAsTag:    false  // when fetching from a feature, use the display field value as the tag
         property string incidentRefField:   ""     // target field name (same on layers A/B/C)
-        property string incidentRefExpr:    "'KMRT-' || format_date(now(),'ddd-dd/MM/yy')||'-1'"
+        property string sessionTag:         ""     // plain text written verbatim into the field
+        // kept for migration — no longer used as expression
+        property string incidentRefExpr:    ""
+
+        // ── Fetch from Feature ────────────────────────────────────────────
+        property string eventLayerName:    ""   // layer to pick features from
+        property string eventDisplayField: ""   // field shown in the feature combo label
+        property string eventStartField:   ""   // datetime field: event start
+        property string eventEndField:     ""   // datetime field: event end (optional)
     }
 
     // Shared timeframe presets — used by the Fetch Logs "Quick range" combo and
-    // the "Cull by age" combo (Settings). minutes:0 = "— custom date range —"
+    // the "Cull by age" combo (Settings). minutes:0 = "— Select date range —"
     // (Fetch Logs only; treated as "no cutoff" if ever selected for cull-by-age).
     ListModel {
         id: timeframeModel
-        ListElement { label: "— custom date range —"; minutes: 0    }
+        ListElement { label: "— Select time period —"; minutes: 0    }
         ListElement { label: "Last 15 minutes";        minutes: 15   }
         ListElement { label: "Last 30 minutes";        minutes: 30   }
         ListElement { label: "Last 1 hour";            minutes: 60   }
@@ -77,12 +86,17 @@ Item {
     property var    positions:   []
     property string lastFetched: ""
     property bool   fetchBusy:   false
+    property var    fetchLog:       []   // session history — see _addToFetchLog()
+    property string fetchTagOverride: "" // set to feature's display value when fetching from a feature
 
     // ── Layer list models (for ComboBoxes in Settings) ─────────────────────
     ListModel { id: ptLayerModel }
     ListModel { id: lnLayerModel }
     ListModel { id: fetchDevsModel }    // device list for Fetch Logs dialog
     ListModel { id: fieldNameModel }    // field names of the append (B) layer
+    ListModel { id: allLayerModel }     // all vector layers (event layer picker in Settings)
+    ListModel { id: eventFieldModel }   // fields of the event layer (shared by 3 combos in Settings)
+    ListModel { id: eventFeatureModel } // features of the event layer (Fetch Logs picker)
 
     // ── Populate a layer model by geometry type ────────────────────────────
     function populateLayers(model, geomType) {
@@ -106,8 +120,10 @@ Item {
         normal.sort(function(a,b){ return a.localeCompare(b) })
         priv.sort  (function(a,b){ return a.localeCompare(b) })
 
+        // Always put "— no layer —" first so the user can de-select a layer
+        model.append({ name: "— no layer —", isHeader: false })
         if (normal.length === 0 && priv.length === 0) {
-            model.append({ name: "— no suitable layers —", isHeader: true })
+            model.append({ name: "— no suitable layers in project —", isHeader: true })
             return
         }
         for (var i = 0; i < normal.length; i++)
@@ -150,6 +166,114 @@ Item {
         }
         for (var i = 0; i < fnames.length; i++)
             model.append({ name: fnames[i], isHeader: false })
+    }
+
+    // ── All vector layers (any geometry, including read-only) ─────────────
+    // Used for the event layer picker — we only read from it, not edit.
+    function populateAllLayers(model) {
+        model.clear()
+        var layers = ProjectUtils.mapLayers(qgisProject)
+        var names  = []
+        for (var id in layers) {
+            var lyr = layers[id]
+            try {
+                // Use .names (JS array) not .count() (not callable in QML)
+                if (lyr && lyr.fields && lyr.fields.names && lyr.fields.names.length > 0)
+                    names.push(lyr.name)
+            } catch(e) {}
+        }
+        names.sort(function(a, b) { return a.localeCompare(b) })
+        model.append({ name: "— none —", isHeader: false })
+        if (names.length === 0) return
+        for (var i = 0; i < names.length; i++)
+            model.append({ name: names[i], isHeader: false })
+    }
+
+    // ── All fields of a named layer (no type filter — user picks) ─────────
+    function populateEventFields(model, layerName) {
+        model.clear()
+        model.append({ name: "— none —", isHeader: false })
+        if (layerName === "" || layerName === "— none —") return
+        var layers = qgisProject.mapLayersByName(layerName)
+        if (layers.length === 0) {
+            model.append({ name: "— layer not found —", isHeader: true })
+            return
+        }
+        var fnames = layers[0].fields.names
+        for (var i = 0; i < fnames.length; i++)
+            model.append({ name: fnames[i], isHeader: false })
+    }
+
+    // ── Feature list for the Fetch Logs "From feature" picker ─────────────
+    // Reads all features from cfg.eventLayerName, labels them using
+    // cfg.eventDisplayField + formatted start/end times, sorts newest-first.
+    function populateEventFeatures() {
+        eventFeatureModel.clear()
+        if (cfg.eventLayerName === "") {
+            eventFeatureModel.append({ label: "— configure Event Layer in Settings —",
+                                       startIso: "", endIso: "", fid: -1 })
+            return
+        }
+        var layers = qgisProject.mapLayersByName(cfg.eventLayerName)
+        if (layers.length === 0) {
+            eventFeatureModel.append({ label: "— layer '" + cfg.eventLayerName + "' not found —",
+                                       startIso: "", endIso: "", fid: -1 })
+            return
+        }
+        var lyr  = layers[0]
+        var rows = []
+        try {
+            var iter = LayerUtils.createFeatureIterator(lyr)
+            while (iter.hasNext()) {
+                var f = iter.next()
+                var disp     = ""
+                var startRaw = ""
+                var endRaw   = ""
+                try { disp     = String(f.attribute(cfg.eventDisplayField) || "") } catch(e) {}
+                if (cfg.eventStartField !== "")
+                    try { startRaw = String(f.attribute(cfg.eventStartField) || "") } catch(e) {}
+                if (cfg.eventEndField !== "")
+                    try { endRaw   = String(f.attribute(cfg.eventEndField)   || "") } catch(e) {}
+
+                var label = (disp !== "" ? disp : ("#" + f.id))
+                if (startRaw !== "") {
+                    var sd = new Date(startRaw)
+                    if (!isNaN(sd.getTime())) {
+                        label += "  (" + Qt.formatDateTime(sd, "dd MMM HH:mm")
+                        if (endRaw !== "") {
+                            var ed = new Date(endRaw)
+                            label += !isNaN(ed.getTime())
+                                     ? " – " + Qt.formatDateTime(ed, "dd MMM HH:mm")
+                                     : " – ongoing"
+                        } else {
+                            label += " – ongoing"
+                        }
+                        label += ")"
+                    }
+                }
+                rows.push({ label: label, startIso: startRaw, endIso: endRaw, fid: f.id, disp: disp })
+            }
+            iter.close()
+        } catch(e) {
+            eventFeatureModel.append({ label: "— error reading features: " + e + " —",
+                                       startIso: "", endIso: "", fid: -1 })
+            return
+        }
+        // Newest first: start field descending, then feature id descending
+        rows.sort(function(a, b) {
+            if (a.startIso !== "" && b.startIso !== "")
+                return b.startIso.localeCompare(a.startIso)
+            if (a.startIso !== "") return -1
+            if (b.startIso !== "") return  1
+            return b.fid - a.fid
+        })
+        if (rows.length === 0) {
+            eventFeatureModel.append({ label: "— no features in layer —",
+                                       startIso: "", endIso: "", fid: -1 })
+            return
+        }
+        for (var i = 0; i < rows.length; i++)
+            eventFeatureModel.append(rows[i])
     }
 
     // ── Register toolbar button ───────────────────────────────────────────
@@ -220,17 +344,6 @@ Item {
                 }
                 ToolButton {
                     contentItem: Text {
-                        text: "📅"
-                        color: "white"
-                        font.pixelSize: 16
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:   Text.AlignVCenter
-                    }
-                    background: Item {}
-                    onClicked:  { mainDialog.close(); fetchLogsDialog.open() }
-                }
-                ToolButton {
-                    contentItem: Text {
                         text: "🔧"
                         color: "white"
                         font.pixelSize: 18
@@ -271,7 +384,7 @@ Item {
                 spacing:          8
                 Button {
                     Layout.fillWidth: true
-                    text:    cfg.liveOn ? "⏹  Stop Live" : "▶  Start Live"
+                    text:    cfg.liveOn ? "⏹  Stop" : "▶  Start"
                     onClicked: {
                         cfg.liveOn = !cfg.liveOn
                         if (cfg.liveOn) fetchAll()
@@ -282,6 +395,10 @@ Item {
                     text:    "↻ Now"
                     enabled: !plugin.fetchBusy
                     onClicked: fetchAll()
+                }
+                Button {
+                    text:    "Fetch"
+                    onClicked: { mainDialog.close(); fetchLogsDialog.open() }
                 }
             }
 
@@ -383,193 +500,58 @@ Item {
 
             ColumnLayout {
                 width:   parent.width
-                spacing: 4
+                spacing: 8
 
-                // ▌ DEVICE LIST ────────────────────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#1565C0"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Device List"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
+                Label {
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
+                    text: "Buttons"
                 }
                 Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Green dot = device online (reporting to Traccar)\n" +
-                          "Grey dot  = device offline\n\n" +
-                          "Speed — km/h from the Traccar position record\n\n" +
-                          "GPS time — when the device's GPS chip recorded that fix. " +
-                          "This is NOT the last-fetch time. A device with poor satellite " +
-                          "signal may show a time older than the fetch. " +
-                          "The 'Last fetched' banner at the top shows when the plugin last " +
-                          "contacted the server.\n\n" +
-                          "Battery % — reported by the device (not all devices send this)\n\n" +
-                          "Crosshair button — pans the map to that device"
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    text: "▶ Start / ⏹ Stop — live tracking (auto-fetch every N min)\n" +
+                          "↻ Now — single fetch immediately\n" +
+                          "Fetch — open Fetch Logs to pull historical positions\n" +
+                          "🔧 — Settings\n" +
+                          "⌖ (device row) — pan map to that device"
                 }
 
-                Item { height: 6 }
-
-                // ▌ CONTROLS ───────────────────────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#1565C0"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Controls"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
+                Label {
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
+                    text: "Layers  (configure in 🔧 Settings → Layers)"
                 }
                 Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Start Live — auto-fetches every N minutes (set in Settings)\n\n" +
-                          "Now — fetch once immediately\n\n" +
-                          "Gear (Settings) — connection and layer setup\n\n" +
-                          "? (Help) — this page"
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    text: "A — Live points: replaced each fetch, one point per device\n" +
+                          "B — Accumulated points: positions appended, never deleted\n" +
+                          "C — Tracks: one line per device, grows with each fetch\n\n" +
+                          "Any layer can be left unset — it will simply be skipped. " +
+                          "Fields not in your layer are silently ignored."
                 }
 
-                Item { height: 6 }
-
-                // ▌ SETTINGS — CONNECTION ──────────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#1565C0"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Settings — Connection"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
+                Label {
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
+                    text: "Fetch Logs"
                 }
                 Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Server URL — full URL of your Traccar server, e.g. " +
-                          "https://server.traccar.org  (no trailing slash needed)\n\n" +
-                          "Email / Username — your Traccar account email\n\n" +
-                          "Password — your Traccar password\n\n" +
-                          "Interval — minutes between automatic fetches in Live mode\n\n" +
-                          "Test Connection — saves credentials and contacts the server; " +
-                          "reports devices found or an error (401 = wrong password, " +
-                          "'No response' = bad URL or no network)"
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    text: "Time period — preset window (last 15 min → last 3 months)\n" +
+                          "Custom dates — enter YYYY-MM-DD or YYYY-MM-DD HH:MM\n" +
+                          "From feature — time window taken from a layer feature's date fields\n\n" +
+                          "All devices are fetched. Writes to whichever of B / C are set in Settings."
                 }
 
-                Item { height: 6 }
-
-                // ▌ SETTINGS — POINT LAYER ─────────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#1565C0"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Settings — Point Layer"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
+                Label {
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
+                    text: "Session Tag  (Settings → Session Tag)"
                 }
                 Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Select an editable point layer to receive device positions.\n\n" +
-                          "Replace mode — layer is cleared on each fetch, shows current positions only\n" +
-                          "Append mode  — new points added each fetch, builds a history\n\n" +
-                          "Fields written (include any subset in your layer):\n" +
-                          "  device_id   integer  Traccar device ID\n" +
-                          "  name        text     device name\n" +
-                          "  status      text     online / offline / unknown\n" +
-                          "  speed_kmh   real     speed in km/h\n" +
-                          "  course      real     bearing in degrees\n" +
-                          "  altitude_m  real     altitude in metres\n" +
-                          "  fix_time    text     GPS fix timestamp (ISO 8601)\n" +
-                          "  battery     real     battery level 0-100\n" +
-                          "  address     text     reverse-geocoded address\n" +
-                          "  motion      text     motion flag from device\n" +
-                          "  fetched_at  text     time the plugin fetched this point\n\n" +
-                          "Fields not present in your layer are silently skipped."
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    text: "Stamps a text value onto every feature written to B and C. " +
+                          "When fetching From feature, the feature's display field value " +
+                          "is used automatically if 'Use display field as tag' is enabled."
                 }
 
-                Item { height: 6 }
-
-                // ▌ SETTINGS — TRACK LINE LAYER ────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#1565C0"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Settings — Track Line Layer"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                }
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "Enable 'Append track line' to grow a polyline per device. " +
-                          "Each fetch appends one new vertex to the device's line feature.\n\n" +
-                          "Select an editable line layer. One feature per device is kept, " +
-                          "identified by device_id.\n\n" +
-                          "Required fields:\n" +
-                          "  device_id  integer  links each line to a device\n" +
-                          "  name       text     written on first creation\n\n" +
-                          "On first sight of a device a placeholder line is created. " +
-                          "Every subsequent fetch adds a vertex at the current position."
-                }
-
-                Item { height: 6 }
-
-                // ▌ QUICK SETUP ────────────────────────────────────────────
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 24
-                    color: "#546E7A"
-                    radius: 3
-                    Label {
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        text: "Quick Setup in QGIS"
-                        color: "white"
-                        font.bold: true
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                }
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    text: "1. In QGIS open the Traccar Live plugin and use " +
-                          "'New GeoPackage...' to create point and track layers " +
-                          "with all fields pre-configured.\n\n" +
-                          "2. Sync your project to QField (QField Cloud or manual copy).\n\n" +
-                          "3. In QField tap the Traccar button, then the gear icon. " +
-                          "Enter server details and pick your layers from the dropdowns.\n\n" +
-                          "4. Tap Test Connection to verify, then Save."
-                }
-
-                Item { height: 8 }
+                Item { height: 4 }
             }
         }
     }
@@ -582,10 +564,37 @@ Item {
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
-        title:   "Traccar Live — Settings"
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
         y:       mainWindow.height * 0.02     // near top so Save is reachable
+
+        header: ToolBar {
+            background: Rectangle { color: "#1565C0" }
+            RowLayout {
+                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
+                Label {
+                    text:             "🔧  Settings"
+                    color:            "white"
+                    font.pixelSize:   16
+                    font.bold:        true
+                    Layout.fillWidth: true
+                }
+                ToolButton {
+                    contentItem: Text {
+                        text: "Fetch"
+                        color: "white"
+                        font.pixelSize: 13
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment:   Text.AlignVCenter
+                    }
+                    background: Item {}
+                    onClicked: { settingsDialog.close(); fetchLogsDialog.open() }
+                }
+            }
+        }
+
+        property bool advancedOpen:    false
+        property bool localUseDisplay: false   // shared between Feature page and Session Tag page
 
         // No standardButtons — Save/Cancel live inside the ScrollView
         footer: Item { height: 0 }
@@ -598,9 +607,12 @@ Item {
             intervalSpin.value = cfg.intervalMin
             populateLayers(ptLayerModel, Qgis.GeometryType.Point)
             restoreSelection(liveLayerCombo,   ptLayerModel, cfg.liveLayerName)
+            if (liveLayerCombo.currentIndex   < 0) liveLayerCombo.currentIndex   = 0
             restoreSelection(appendLayerCombo, ptLayerModel, cfg.appendLayerName)
+            if (appendLayerCombo.currentIndex < 0) appendLayerCombo.currentIndex = 0
             populateLayers(lnLayerModel, Qgis.GeometryType.Line)
             restoreSelection(lnLayerCombo, lnLayerModel, cfg.lineLayerName)
+            if (lnLayerCombo.currentIndex     < 0) lnLayerCombo.currentIndex     = 0
             cullCountCheck.checked = cfg.cullByCount
             cullMaxSpin.value      = cfg.cullMaxPerDevice
             cullAgeCheck.checked   = cfg.cullByAge
@@ -611,10 +623,25 @@ Item {
                     break
                 }
             }
-            incidentRefCheck.checked = cfg.incidentRefEnabled
+            incidentRefCheck.checked        = cfg.incidentRefEnabled
+            settingsDialog.localUseDisplay  = cfg.useDisplayAsTag
+            sessionTagField.text            = cfg.sessionTag
             populateFieldNames(fieldNameModel, cfg.appendLayerName)
             restoreSelection(incidentRefFieldCombo, fieldNameModel, cfg.incidentRefField)
-            incidentRefExprField.text = cfg.incidentRefExpr
+            // Event Layer (Fetch from Feature)
+            populateAllLayers(allLayerModel)
+            restoreSelection(eventLayerCombo, allLayerModel, cfg.eventLayerName)
+            if (eventLayerCombo.currentIndex < 0) eventLayerCombo.currentIndex = 0
+            var _evItem = allLayerModel.get(eventLayerCombo.currentIndex)
+            var _evName = (_evItem && !_evItem.isHeader && _evItem.name !== "— none —")
+                          ? _evItem.name : ""
+            populateEventFields(eventFieldModel, _evName)
+            restoreSelection(eventDisplayFieldCombo, eventFieldModel, cfg.eventDisplayField)
+            if (eventDisplayFieldCombo.currentIndex < 0) eventDisplayFieldCombo.currentIndex = 0
+            restoreSelection(eventStartFieldCombo,   eventFieldModel, cfg.eventStartField)
+            if (eventStartFieldCombo.currentIndex < 0) eventStartFieldCombo.currentIndex = 0
+            restoreSelection(eventEndFieldCombo,     eventFieldModel, cfg.eventEndField)
+            if (eventEndFieldCombo.currentIndex < 0) eventEndFieldCombo.currentIndex = 0
         }
 
         function saveSettings() {
@@ -624,380 +651,518 @@ Item {
             cfg.intervalMin = intervalSpin.value
             if (liveLayerCombo.currentIndex >= 0 && ptLayerModel.count > 0) {
                 var liveItem = ptLayerModel.get(liveLayerCombo.currentIndex)
-                cfg.liveLayerName = (liveItem && !liveItem.isHeader) ? liveItem.name : ""
+                cfg.liveLayerName = (liveItem && !liveItem.isHeader
+                                     && liveItem.name !== "— no layer —")
+                                    ? liveItem.name : ""
             }
             if (appendLayerCombo.currentIndex >= 0 && ptLayerModel.count > 0) {
                 var appItem = ptLayerModel.get(appendLayerCombo.currentIndex)
-                cfg.appendLayerName = (appItem && !appItem.isHeader) ? appItem.name : ""
+                cfg.appendLayerName = (appItem && !appItem.isHeader
+                                       && appItem.name !== "— no layer —")
+                                      ? appItem.name : ""
             }
             if (lnLayerCombo.currentIndex >= 0 && lnLayerModel.count > 0) {
                 var lnItem = lnLayerModel.get(lnLayerCombo.currentIndex)
-                if (lnItem && !lnItem.isHeader) cfg.lineLayerName = lnItem.name
+                cfg.lineLayerName = (lnItem && !lnItem.isHeader
+                                     && lnItem.name !== "— no layer —")
+                                    ? lnItem.name : ""
             }
             cfg.cullByCount      = cullCountCheck.checked
             cfg.cullMaxPerDevice = cullMaxSpin.value
             cfg.cullByAge        = cullAgeCheck.checked
             if (cullAgeCombo.currentIndex >= 0)
                 cfg.cullAgeMinutes = timeframeModel.get(cullAgeCombo.currentIndex).minutes
-            cfg.incidentRefEnabled = incidentRefCheck.checked
+            cfg.incidentRefEnabled  = incidentRefCheck.checked
+            cfg.useDisplayAsTag     = settingsDialog.localUseDisplay
             if (incidentRefFieldCombo.currentIndex >= 0 && fieldNameModel.count > 0) {
                 var refItem = fieldNameModel.get(incidentRefFieldCombo.currentIndex)
                 cfg.incidentRefField = (refItem && !refItem.isHeader) ? refItem.name : ""
             } else {
                 cfg.incidentRefField = ""
             }
-            cfg.incidentRefExpr = incidentRefExprField.text
+            cfg.sessionTag = sessionTagField.text.trim()
+            // Event Layer (Fetch from Feature)
+            var _evL = (eventLayerCombo.currentIndex >= 0 && allLayerModel.count > 0)
+                       ? allLayerModel.get(eventLayerCombo.currentIndex) : null
+            cfg.eventLayerName = (_evL && !_evL.isHeader && _evL.name !== "— none —")
+                                 ? _evL.name : ""
+            var _evD = (eventDisplayFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
+                       ? eventFieldModel.get(eventDisplayFieldCombo.currentIndex) : null
+            cfg.eventDisplayField = (_evD && !_evD.isHeader && _evD.name !== "— none —")
+                                    ? _evD.name : ""
+            var _evS = (eventStartFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
+                       ? eventFieldModel.get(eventStartFieldCombo.currentIndex) : null
+            cfg.eventStartField = (_evS && !_evS.isHeader && _evS.name !== "— none —")
+                                  ? _evS.name : ""
+            var _evE = (eventEndFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
+                       ? eventFieldModel.get(eventEndFieldCombo.currentIndex) : null
+            cfg.eventEndField = (_evE && !_evE.isHeader && _evE.name !== "— none —")
+                                ? _evE.name : ""
             if (refreshTimer.running) refreshTimer.restart()
             mainWindow.displayToast("Settings saved")
             settingsDialog.close()
             mainDialog.open()
         }
 
-        // ── Scrollable content (Save/Cancel at bottom, always reachable) ──
+        // ── Section selector + paged content ──────────────────────────────
+        ButtonGroup { id: settingsSectionGroup }
+
         ScrollView {
-            width:                  parent.width
-            height:                 Math.min(implicitHeight, mainWindow.height * 0.88)
-            contentWidth:           parent.width
+            width:        parent.width
+            height:       Math.min(implicitHeight, mainWindow.height * 0.88)
+            contentWidth: parent.width
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
                 width:   parent.width
-                spacing: 6
+                spacing: 8
 
-                // ── Connection ─────────────────────────────────────────────
-                Label { text: "── Connection ──"; font.bold: true }
-
-                Label { text: "Server URL:" }
-                TextField {
-                    id:               urlField
-                    Layout.fillWidth: true
-                    placeholderText:  "https://server.traccar.org"
-                    inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
-                }
-
-                Label { text: "Email / Username:" }
-                TextField {
-                    id:               userField
-                    Layout.fillWidth: true
-                    inputMethodHints: Qt.ImhEmailCharactersOnly
-                }
-
-                Label { text: "Password:" }
-                TextField {
-                    id:       passField
-                    Layout.fillWidth: true
-                    echoMode: TextInput.Password
-                }
-
-                Label { text: "Auto-refresh:" }
+                // ── Radio nav (single row) ─────────────────────────────────
                 RowLayout {
-                    SpinBox { id: intervalSpin; from: 1; to: 120; value: 3 }
-                    Label   { text: "min" }
+                    Layout.fillWidth: true
+                    spacing:          0
+
+                    RadioButton {
+                        id:    s1Radio
+                        text:  "Connection"
+                        checked: true
+                        ButtonGroup.group: settingsSectionGroup
+                        Layout.fillWidth: true
+                        font.pixelSize:   11
+                    }
+                    RadioButton {
+                        id:    s2Radio
+                        text:  "Layers"
+                        ButtonGroup.group: settingsSectionGroup
+                        Layout.fillWidth: true
+                        font.pixelSize:   11
+                    }
+                    RadioButton {
+                        id:    s3Radio
+                        text:  "Feature"
+                        ButtonGroup.group: settingsSectionGroup
+                        Layout.fillWidth: true
+                        font.pixelSize:   11
+                    }
+                    RadioButton {
+                        id:    s4Radio
+                        text:  "Session Tag"
+                        ButtonGroup.group: settingsSectionGroup
+                        Layout.fillWidth: true
+                        font.pixelSize:   11
+                    }
                 }
 
-                RowLayout {
-                    CheckBox {
-                        id: histCheck
-                        checked: cfg.fetchHistory
-                        onCheckedChanged: cfg.fetchHistory = checked
+                // ══ Page 1 — Connection ════════════════════════════════════
+                ColumnLayout {
+                    visible:          s1Radio.checked
+                    Layout.fillWidth: true
+                    spacing:          6
+
+                    Label { text: "Server URL:" }
+                    TextField {
+                        id:               urlField
+                        Layout.fillWidth: true
+                        placeholderText:  "https://server.traccar.org"
+                        inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                    }
+                    Label { text: "Email / Username:" }
+                    TextField {
+                        id:               userField
+                        Layout.fillWidth: true
+                        inputMethodHints: Qt.ImhEmailCharactersOnly
+                    }
+                    Label { text: "Password:" }
+                    TextField {
+                        id:       passField
+                        Layout.fillWidth: true
+                        echoMode: TextInput.Password
+                    }
+                    Label { text: "Auto-refresh:" }
+                    RowLayout {
+                        SpinBox { id: intervalSpin; from: 1; to: 120; value: 3 }
+                        Label   { text: "min" }
+                    }
+                    RowLayout {
+                        CheckBox {
+                            id: histCheck
+                            checked: cfg.fetchHistory
+                            onCheckedChanged: cfg.fetchHistory = checked
+                        }
+                        Label {
+                            text: "Fetch full track history between refreshes"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                            font.pixelSize: 12
+                        }
                     }
                     Label {
-                        text: "Fetch full track history between refreshes"
-                        wrapMode: Text.WordWrap
+                        visible:          cfg.fetchHistory
                         Layout.fillWidth: true
+                        wrapMode:         Text.WordWrap
+                        font.pixelSize:   11
+                        color:            Theme.secondaryTextColor
+                        text: "Each auto-fetch pulls every GPS fix since the last fetch " +
+                              "(one API call per device). Intermediate points go to B and C. " +
+                              "Disable to fetch current positions only."
                     }
-                }
-                Label {
-                    visible: cfg.fetchHistory
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: 11
-                    color: Theme.secondaryTextColor
-                    text: "When enabled, each fetch pulls every GPS fix recorded since " +
-                          "the last fetch (one API call per device). " +
-                          "All intermediate points are added to the point layer " +
-                          "and as vertices to the track line. " +
-                          "Disable to fetch current positions only."
-                }
-
-                Button {
-                    text:             "Test Connection"
-                    Layout.fillWidth: true
-                    onClicked: {
-                        // Save credentials first so test uses current values
-                        cfg.serverUrl = urlField.text.trim().replace(/\/+$/, "")
-                        cfg.username  = userField.text.trim()
-                        cfg.password  = passField.text
-                        testConnection()
-                    }
-                }
-
-                // ── Point layers ───────────────────────────────────────────
-                Item { height: 6 }
-                Label { text: "── Point Layers ──"; font.bold: true }
-
-                Label {
-                    text: "A  Live layer  (cleared and repopulated each fetch — one point per device):"
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                ComboBox {
-                    id:               liveLayerCombo
-                    Layout.fillWidth: true
-                    model:            ptLayerModel
-                    textRole:         "name"
-                    delegate: ItemDelegate {
-                        width:   liveLayerCombo.width
-                        enabled: !model.isHeader
-                        contentItem: Text {
-                            text:              model.name
-                            color:             model.isHeader ? Theme.secondaryTextColor
-                                                              : Theme.mainTextColor
-                            font.pixelSize:    model.isHeader ? 10 : 13
-                            verticalAlignment: Text.AlignVCenter
-                            leftPadding:       model.isHeader ? 4 : 12
+                    Button {
+                        text:             "Test Connection"
+                        Layout.fillWidth: true
+                        onClicked: {
+                            cfg.serverUrl = urlField.text.trim().replace(/\/+$/, "")
+                            cfg.username  = userField.text.trim()
+                            cfg.password  = passField.text
+                            testConnection()
                         }
-                        highlighted: liveLayerCombo.highlightedIndex === index
                     }
                 }
 
-                Item { height: 4 }
-                Label {
-                    text: "B  History layer  (all positions appended each fetch):"
-                    wrapMode: Text.WordWrap
+                // ══ Page 2 — Layers ═══════════════════════════════════════
+                ColumnLayout {
+                    visible:          s2Radio.checked
                     Layout.fillWidth: true
-                }
-                ComboBox {
-                    id:               appendLayerCombo
-                    Layout.fillWidth: true
-                    model:            ptLayerModel
-                    textRole:         "name"
-                    delegate: ItemDelegate {
-                        width:   appendLayerCombo.width
-                        enabled: !model.isHeader
-                        contentItem: Text {
-                            text:              model.name
-                            color:             model.isHeader ? Theme.secondaryTextColor
-                                                              : Theme.mainTextColor
-                            font.pixelSize:    model.isHeader ? 10 : 13
-                            verticalAlignment: Text.AlignVCenter
-                            leftPadding:       model.isHeader ? 4 : 12
+                    spacing:          6
+
+                    Label {
+                        text: "A — Live points\nCleared and replaced on every fetch. One point per device."
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12
+                    }
+                    ComboBox {
+                        id: liveLayerCombo; Layout.fillWidth: true
+                        model: ptLayerModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: liveLayerCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: liveLayerCombo.highlightedIndex === index
                         }
-                        highlighted: appendLayerCombo.highlightedIndex === index
                     }
-                    // Refresh the "Auto-fill Field" combo when the History
-                    // layer (B) selection changes within this dialog session.
-                    onActivated: {
-                        var item = (currentIndex >= 0 && ptLayerModel.count > 0)
-                            ? ptLayerModel.get(currentIndex) : null
-                        var layerName = (item && !item.isHeader) ? item.name : ""
-                        var prevField = cfg.incidentRefField
-                        populateFieldNames(fieldNameModel, layerName)
-                        restoreSelection(incidentRefFieldCombo, fieldNameModel, prevField)
+
+                    Item { height: 2 }
+                    Label {
+                        text: "B — Accumulated points\nPositions appended on every fetch. Builds a full history."
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12
                     }
-                }
-                Label {
-                    text: "Leave either combo blank (no selection) to disable that layer."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
+                    ComboBox {
+                        id: appendLayerCombo; Layout.fillWidth: true
+                        model: ptLayerModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: appendLayerCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: appendLayerCombo.highlightedIndex === index
+                        }
+                        onActivated: {
+                            var item = (currentIndex >= 0 && ptLayerModel.count > 0)
+                                ? ptLayerModel.get(currentIndex) : null
+                            var layerName = (item && !item.isHeader) ? item.name : ""
+                            var prevField = cfg.incidentRefField
+                            populateFieldNames(fieldNameModel, layerName)
+                            restoreSelection(incidentRefFieldCombo, fieldNameModel, prevField)
+                        }
+                    }
+
+                    Item { height: 2 }
+                    RowLayout {
+                        CheckBox {
+                            id: trackCheck; checked: cfg.appendTrack
+                            onCheckedChanged: cfg.appendTrack = checked
+                        }
+                        Label {
+                            text: "C — Tracks  (line layer, one per device)"
+                            Layout.fillWidth: true; font.pixelSize: 12
+                        }
+                    }
+                    ComboBox {
+                        id: lnLayerCombo; Layout.fillWidth: true
+                        enabled: cfg.appendTrack; model: lnLayerModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: lnLayerCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: lnLayerCombo.highlightedIndex === index
+                        }
+                    }
+
+                    Label {
+                        text: "Select '— no layer —' to disable a layer."
+                        font.pixelSize: 11; color: Theme.secondaryTextColor
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
+                    }
+
+                    // Advanced — culling
+                    Button {
+                        Layout.fillWidth: true; flat: true
+                        text: (settingsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — layer B housekeeping"
+                        onClicked: settingsDialog.advancedOpen = !settingsDialog.advancedOpen
+                    }
+                    ColumnLayout {
+                        visible: settingsDialog.advancedOpen
+                        Layout.fillWidth: true; spacing: 6
+                        Label {
+                            text: "Automatically trim layer B after each live fetch."
+                            font.pixelSize: 11; color: Theme.secondaryTextColor
+                            wrapMode: Text.WordWrap; Layout.fillWidth: true
+                        }
+                        RowLayout {
+                            CheckBox { id: cullCountCheck; checked: cfg.cullByCount }
+                            Label { text: "Keep at most" }
+                            SpinBox {
+                                id: cullMaxSpin; from: 1; to: 100000; stepSize: 50
+                                editable: true; value: cfg.cullMaxPerDevice
+                                enabled: cullCountCheck.checked
+                            }
+                            Label {
+                                text: "pts / device"; Layout.fillWidth: true
+                                opacity: cullCountCheck.checked ? 1.0 : 0.6
+                            }
+                        }
+                        RowLayout {
+                            CheckBox { id: cullAgeCheck; checked: cfg.cullByAge }
+                            Label { text: "Remove points older than:"; Layout.fillWidth: true }
+                        }
+                        ComboBox {
+                            id: cullAgeCombo; Layout.fillWidth: true
+                            enabled: cullAgeCheck.checked; opacity: enabled ? 1.0 : 0.6
+                            model: timeframeModel; textRole: "label"
+                            delegate: ItemDelegate {
+                                width: cullAgeCombo.width
+                                contentItem: Text {
+                                    text: model.label; color: Theme.mainTextColor
+                                    font.pixelSize: 13; verticalAlignment: Text.AlignVCenter
+                                }
+                                highlighted: cullAgeCombo.highlightedIndex === index
+                            }
+                        }
+                        Label {
+                            text: "Track layer (C) is never culled."
+                            font.pixelSize: 11; color: Theme.secondaryTextColor
+                            wrapMode: Text.WordWrap; Layout.fillWidth: true
+                        }
+                    }
                 }
 
-                // ── Layer B housekeeping (culling) ──────────────────────────
-                Item { height: 6 }
-                Label { text: "── Layer B Housekeeping ──"; font.bold: true }
-                Label {
-                    text: "Optionally remove old points from the History layer (B) after each Live fetch."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
+                // ══ Page 3 — From Feature ═════════════════════════════════
+                ColumnLayout {
+                    visible:          s3Radio.checked
                     Layout.fillWidth: true
-                }
+                    spacing:          6
 
-                RowLayout {
-                    CheckBox {
-                        id:      cullCountCheck
-                        checked: cfg.cullByCount
+                    Label {
+                        text: "Pick a layer and date/time fields so Fetch Logs can derive " +
+                              "its time window directly from a selected feature.\n\n" +
+                              "When fetching from a feature the display field value " +
+                              "(e.g. incident_ref) is automatically used as the session tag " +
+                              "for those positions, if session tagging is enabled."
+                        font.pixelSize: 11; color: Theme.secondaryTextColor
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
                     }
-                    Label { text: "Keep at most" }
-                    SpinBox {
-                        id: cullMaxSpin
-                        from: 1; to: 100000; stepSize: 50
-                        editable: true
-                        value:   cfg.cullMaxPerDevice
-                        enabled: cullCountCheck.checked
+                    Label { text: "Layer:" }
+                    ComboBox {
+                        id: eventLayerCombo; Layout.fillWidth: true
+                        model: allLayerModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: eventLayerCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: eventLayerCombo.highlightedIndex === index
+                        }
+                        onActivated: {
+                            var item = (currentIndex >= 0 && allLayerModel.count > 0)
+                                       ? allLayerModel.get(currentIndex) : null
+                            var lname = (item && !item.isHeader && item.name !== "— none —")
+                                        ? item.name : ""
+                            var prevD = cfg.eventDisplayField
+                            var prevS = cfg.eventStartField
+                            var prevE = cfg.eventEndField
+                            populateEventFields(eventFieldModel, lname)
+                            restoreSelection(eventDisplayFieldCombo, eventFieldModel, prevD)
+                            if (eventDisplayFieldCombo.currentIndex < 0) eventDisplayFieldCombo.currentIndex = 0
+                            restoreSelection(eventStartFieldCombo, eventFieldModel, prevS)
+                            if (eventStartFieldCombo.currentIndex < 0) eventStartFieldCombo.currentIndex = 0
+                            restoreSelection(eventEndFieldCombo, eventFieldModel, prevE)
+                            if (eventEndFieldCombo.currentIndex < 0) eventEndFieldCombo.currentIndex = 0
+                        }
+                    }
+                    Label { text: "Display field  (shown in the feature picker):" }
+                    ComboBox {
+                        id: eventDisplayFieldCombo; Layout.fillWidth: true
+                        model: eventFieldModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: eventDisplayFieldCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: eventDisplayFieldCombo.highlightedIndex === index
+                        }
+                    }
+                    Label { text: "Start time field:" }
+                    ComboBox {
+                        id: eventStartFieldCombo; Layout.fillWidth: true
+                        model: eventFieldModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: eventStartFieldCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: eventStartFieldCombo.highlightedIndex === index
+                        }
+                    }
+                    Label { text: "End time field  (optional):" }
+                    ComboBox {
+                        id: eventEndFieldCombo; Layout.fillWidth: true
+                        model: eventFieldModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: eventEndFieldCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: eventEndFieldCombo.highlightedIndex === index
+                        }
+                    }
+
+                    Item { height: 4 }
+                    RowLayout {
+                        CheckBox {
+                            id: useAsTagCheck
+                            checked: settingsDialog.localUseDisplay
+                            onCheckedChanged: {
+                                settingsDialog.localUseDisplay = checked
+                                if (checked) incidentRefCheck.checked = true
+                            }
+                        }
+                        Label {
+                            text: "Use display field as session tag when fetching from this feature"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
                     }
                     Label {
-                        text: "points / device"
+                        visible: useAsTagCheck.checked
+                        text: "The display field value (e.g. incident_ref) will be written into the " +
+                              "tag field configured on the Session Tag page."
+                        font.pixelSize: 11; color: Theme.secondaryTextColor
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
+                    }
+                }
+
+                // ══ Page 4 — Session Tag ══════════════════════════════════
+                ColumnLayout {
+                    visible:          s4Radio.checked
+                    Layout.fillWidth: true
+                    spacing:          6
+
+                    Label {
+                        text: "Stamp a text tag on every point and track written to layers A, B and C."
+                        font.pixelSize: 11; color: Theme.secondaryTextColor
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
+                    }
+                    RowLayout {
+                        CheckBox {
+                            id: incidentRefCheck
+                            checked: cfg.incidentRefEnabled
+                        }
+                        Label {
+                            text: "Enable session tagging"
+                            Layout.fillWidth: true
+                        }
+                    }
+                    Label {
+                        text: "Tag value  (stamped on every fetched feature):"
+                        enabled: incidentRefCheck.checked
+                        opacity: enabled ? 1.0 : 0.6
+                    }
+                    TextField {
+                        id:              sessionTagField
                         Layout.fillWidth: true
-                        opacity: cullCountCheck.checked ? 1.0 : 0.6
+                        placeholderText: "e.g. FIRE-2026-001"
+                        enabled:         incidentRefCheck.checked
+                        opacity:         enabled ? 1.0 : 0.6
                     }
-                }
-
-                RowLayout {
-                    CheckBox {
-                        id:      cullAgeCheck
-                        checked: cfg.cullByAge
+                    Label {
+                        text: "Write tag into field  (on layer B — accumulated points):"
+                        enabled: incidentRefCheck.checked
+                        opacity: enabled ? 1.0 : 0.6
                     }
-                    Label { text: "Remove points older than:"; Layout.fillWidth: true }
-                }
-                ComboBox {
-                    id:               cullAgeCombo
-                    Layout.fillWidth: true
-                    enabled:          cullAgeCheck.checked
-                    opacity:          enabled ? 1.0 : 0.6
-                    model:            timeframeModel
-                    textRole:         "label"
-                    delegate: ItemDelegate {
-                        width: cullAgeCombo.width
-                        contentItem: Text {
-                            text:              model.label
-                            color:             Theme.mainTextColor
-                            font.pixelSize:    13
-                            verticalAlignment: Text.AlignVCenter
+                    ComboBox {
+                        id: incidentRefFieldCombo
+                        Layout.fillWidth: true
+                        enabled: incidentRefCheck.checked
+                        opacity: enabled ? 1.0 : 0.6
+                        model: fieldNameModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: incidentRefFieldCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: incidentRefFieldCombo.highlightedIndex === index
                         }
-                        highlighted: cullAgeCombo.highlightedIndex === index
                     }
-                }
-                Label {
-                    text: "Both checks run after each Live fetch updates layer B (per device, by fix time). The track line layer (C) is never culled."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                }
-
-                // ── Auto-fill field on new features ─────────────────────────
-                Item { height: 6 }
-                Label { text: "── Auto-fill Field on New Features ──"; font.bold: true }
-                Label {
-                    text: "Optionally write an evaluated expression into a field on every new point/track feature created by this plugin (layers A, B and C)."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                RowLayout {
-                    CheckBox {
-                        id:      incidentRefCheck
-                        checked: cfg.incidentRefEnabled
-                    }
-                    Label { text: "Auto-fill field"; Layout.fillWidth: true }
-                }
-                Label {
-                    text:    "Field (from History layer B):"
-                    enabled: incidentRefCheck.checked
-                    color:   incidentRefCheck.checked ? Theme.mainTextColor : Theme.secondaryTextColor
-                }
-                ComboBox {
-                    id:               incidentRefFieldCombo
-                    Layout.fillWidth: true
-                    enabled:          incidentRefCheck.checked
-                    opacity:          enabled ? 1.0 : 0.6
-                    model:            fieldNameModel
-                    textRole:         "name"
-                    delegate: ItemDelegate {
-                        width:   incidentRefFieldCombo.width
-                        enabled: !model.isHeader
-                        contentItem: Text {
-                            text:              model.name
-                            color:             model.isHeader ? Theme.secondaryTextColor
-                                                              : Theme.mainTextColor
-                            font.pixelSize:    model.isHeader ? 10 : 13
-                            verticalAlignment: Text.AlignVCenter
-                            leftPadding:       model.isHeader ? 4 : 12
+                    Item { height: 4 }
+                    RowLayout {
+                        enabled: incidentRefCheck.checked
+                        opacity: enabled ? 1.0 : 0.6
+                        CheckBox {
+                            id: useDisplayFieldCheck
+                            checked: settingsDialog.localUseDisplay
+                            onCheckedChanged: settingsDialog.localUseDisplay = checked
                         }
-                        highlighted: incidentRefFieldCombo.highlightedIndex === index
-                    }
-                }
-                Label {
-                    text:    "Expression:"
-                    enabled: incidentRefCheck.checked
-                    color:   incidentRefCheck.checked ? Theme.mainTextColor : Theme.secondaryTextColor
-                }
-                TextField {
-                    id:               incidentRefExprField
-                    Layout.fillWidth: true
-                    enabled:          incidentRefCheck.checked
-                    opacity:          enabled ? 1.0 : 0.6
-                    text:             cfg.incidentRefExpr
-                    placeholderText:  "'KMRT-' || format_date(now(),'ddd-dd/MM/yy')||'-1'"
-                    font.family:      "monospace"
-                }
-                Label {
-                    text: "Subset of QGIS expressions: string literals ('...'), the || operator, and now() / today() / format_date(expr,'fmt')."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                }
-
-                // ── Line track layer ───────────────────────────────────────
-                Item { height: 6 }
-                Label { text: "── Track Line Layer ──"; font.bold: true }
-
-                RowLayout {
-                    CheckBox {
-                        id:        trackCheck
-                        checked:   cfg.appendTrack
-                        onCheckedChanged: cfg.appendTrack = checked
-                    }
-                    Label { text: "Append vertex to line track layer" }
-                }
-
-                Label {
-                    text:    "Line layer:"
-                    enabled: cfg.appendTrack
-                    color:   cfg.appendTrack ? Theme.mainTextColor : Theme.secondaryTextColor
-                }
-                ComboBox {
-                    id:               lnLayerCombo
-                    Layout.fillWidth: true
-                    enabled:          cfg.appendTrack
-                    model:            lnLayerModel
-                    textRole:         "name"
-                    delegate: ItemDelegate {
-                        width:   lnLayerCombo.width
-                        enabled: !model.isHeader
-                        contentItem: Text {
-                            text:              model.name
-                            color:             model.isHeader ? Theme.secondaryTextColor
-                                                              : Theme.mainTextColor
-                            font.pixelSize:    model.isHeader ? 10 : 13
-                            verticalAlignment: Text.AlignVCenter
-                            leftPadding:       model.isHeader ? 4 : 12
+                        Label {
+                            text: "Use display field as tag when fetching from a feature"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
                         }
-                        highlighted: lnLayerCombo.highlightedIndex === index
+                    }
+                    Label {
+                        visible: settingsDialog.localUseDisplay && incidentRefCheck.checked
+                        text: "When 'From Feature' is used in Fetch Logs, the selected feature's " +
+                              "display field value overrides the tag value above."
+                        font.pixelSize: 11; color: Theme.secondaryTextColor
+                        wrapMode: Text.WordWrap; Layout.fillWidth: true
                     }
                 }
 
-                Label {
-                    text:       "Line layer fields expected:\ndevice_id (integer), name (text)"
-                    font.pixelSize: 10
-                    color:          Theme.secondaryTextColor
-                    wrapMode:       Text.WordWrap
-                    Layout.fillWidth: true
-                    visible:    cfg.appendTrack
-                }
-
-                // ── Save / Cancel ──────────────────────────────────────────
+                // ── Save / Cancel (always visible) ─────────────────────────
                 Item { height: 8 }
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
                     Button {
-                        text:             "Cancel"
-                        Layout.fillWidth: true
-                        onClicked: {
-                            settingsDialog.close()
-                            mainDialog.open()
-                        }
+                        text: "Cancel"; Layout.fillWidth: true
+                        onClicked: { settingsDialog.close(); mainDialog.open() }
                     }
                     Button {
-                        text:             "Save"
-                        Layout.fillWidth: true
-                        onClicked:        settingsDialog.saveSettings()
+                        text: "Save"; Layout.fillWidth: true
+                        onClicked: settingsDialog.saveSettings()
                     }
                 }
                 Item { height: 8 }
@@ -1013,24 +1178,57 @@ Item {
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
-        title:   "Traccar Live — Fetch Logs"
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
         y:       (mainWindow.height - height) * 0.08
 
         // Runtime state
-        property var    fetchDevices: []
-        property bool   fetchLogBusy: false
-        property string fetchStatus:  "Loading devices…"
+        property var    fetchDevices:  []
+        property bool   fetchLogBusy:  false
+        property string fetchStatus:   "Loading devices…"
+        property bool   advancedOpen:  false
+
+        header: ToolBar {
+            background: Rectangle { color: "#1565C0" }
+            RowLayout {
+                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
+                Label {
+                    text:             "📅  Fetch Logs"
+                    color:            "white"
+                    font.pixelSize:   16
+                    font.bold:        true
+                    Layout.fillWidth: true
+                }
+                ToolButton {
+                    contentItem: Text {
+                        text: "🔧"
+                        color: "white"
+                        font.pixelSize: 18
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment:   Text.AlignVCenter
+                    }
+                    background: Item {}
+                    onClicked: { fetchLogsDialog.close(); settingsDialog.open() }
+                    ToolTip.visible: hovered
+                    ToolTip.text:    "Switch to Settings"
+                }
+            }
+        }
 
         standardButtons: Dialog.Close
         onRejected: mainDialog.open()
+
+        // Radio group: which time-window mode is active
+        ButtonGroup { id: rangeMode }
+        // Radio group: which direction when deriving window from a feature
+        ButtonGroup { id: featureWindowGroup }
 
         onOpened: {
             var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
             fromDateField.text = today
             toDateField.text   = today
             quickRangeCombo.currentIndex = 0
+            populateEventFeatures()
             loadFetchDevices()
         }
 
@@ -1044,16 +1242,41 @@ Item {
                 width:   parent.width
                 spacing: 6
 
-                // ── Date range ─────────────────────────────────────────────
+                // ── Time window ────────────────────────────────────────────
                 Label {
-                    text: "── Date Range  (full days, local time) ──"
+                    text: "── Time Window ──"
                     font.bold: true
                 }
 
-                Label { text: "Quick range:" }
+                // Mode selector
+                RowLayout {
+                    Layout.fillWidth: true
+                    RadioButton {
+                        id:    quickRangeRadio
+                        text:  "Time period"
+                        ButtonGroup.group: rangeMode
+                        checked: true
+                        font.pixelSize: 12
+                    }
+                    RadioButton {
+                        id:    customDatesRadio
+                        text:  "Custom dates"
+                        ButtonGroup.group: rangeMode
+                        font.pixelSize: 12
+                    }
+                    RadioButton {
+                        id:    fromFeatureRadio
+                        text:  "From feature"
+                        ButtonGroup.group: rangeMode
+                        font.pixelSize: 12
+                    }
+                }
+
+                // ── Time period ────────────────────────────────────────────
                 ComboBox {
                     id:               quickRangeCombo
                     Layout.fillWidth: true
+                    visible:          quickRangeRadio.checked
                     model:            timeframeModel
                     textRole:         "label"
                     delegate: ItemDelegate {
@@ -1068,144 +1291,189 @@ Item {
                     }
                 }
 
+                // ── Custom dates ───────────────────────────────────────────
                 Label {
-                    text: "From date:"
-                    opacity: quickRangeCombo.currentIndex === 0 ? 1.0 : 0.6
+                    text:    "From (date + time, local):"
+                    visible: customDatesRadio.checked
+                    font.pixelSize: 12
                 }
                 TextField {
                     id:               fromDateField
                     Layout.fillWidth: true
-                    placeholderText:  "YYYY-MM-DD"
-                    inputMethodHints: Qt.ImhDigitsOnly
-                    enabled:          quickRangeCombo.currentIndex === 0
-                    opacity:          enabled ? 1.0 : 0.6
+                    visible:          customDatesRadio.checked
+                    placeholderText:  "YYYY-MM-DD HH:MM"
+                    inputMethodHints: Qt.ImhNone
                 }
-
                 Label {
-                    text: "To date:"
-                    opacity: quickRangeCombo.currentIndex === 0 ? 1.0 : 0.6
+                    text:    "To (date + time, local):"
+                    visible: customDatesRadio.checked
+                    font.pixelSize: 12
                 }
                 TextField {
                     id:               toDateField
                     Layout.fillWidth: true
-                    placeholderText:  "YYYY-MM-DD"
-                    inputMethodHints: Qt.ImhDigitsOnly
-                    enabled:          quickRangeCombo.currentIndex === 0
-                    opacity:          enabled ? 1.0 : 0.6
+                    visible:          customDatesRadio.checked
+                    placeholderText:  "YYYY-MM-DD HH:MM"
+                    inputMethodHints: Qt.ImhNone
                 }
 
-                // ── Devices ────────────────────────────────────────────────
-                Item { height: 4 }
-                Label { text: "── Devices ──"; font.bold: true }
-
+                // ── From feature ───────────────────────────────────────────
+                Label {
+                    text:    "Feature:"
+                    visible: fromFeatureRadio.checked
+                }
                 RowLayout {
-                    CheckBox {
-                        id:      fetchAllDevsCheck
-                        checked: true
-                        onCheckedChanged: fetchDevCombo.enabled = !checked
-                    }
-                    Label {
-                        text:             "All devices  (including offline)"
-                        Layout.fillWidth: true
-                    }
-                }
-
-                ComboBox {
-                    id:               fetchDevCombo
+                    visible:          fromFeatureRadio.checked
                     Layout.fillWidth: true
-                    enabled:          false
-                    model:            fetchDevsModel
-                    textRole:         "label"
-                    delegate: ItemDelegate {
-                        width:   fetchDevCombo.width
-                        contentItem: Text {
-                            text:              model.label
-                            color:             Theme.mainTextColor
-                            font.pixelSize:    13
-                            verticalAlignment: Text.AlignVCenter
+                    ComboBox {
+                        id:               eventFeatureCombo
+                        Layout.fillWidth: true
+                        model:            eventFeatureModel
+                        textRole:         "label"
+                        delegate: ItemDelegate {
+                            width: eventFeatureCombo.width
+                            contentItem: Text {
+                                text:              model.label
+                                color:             model.fid < 0
+                                                   ? Theme.secondaryTextColor
+                                                   : Theme.mainTextColor
+                                font.pixelSize:    12
+                                verticalAlignment: Text.AlignVCenter
+                                wrapMode:          Text.WordWrap
+                                leftPadding:       4
+                            }
+                            highlighted: eventFeatureCombo.highlightedIndex === index
                         }
-                        highlighted: fetchDevCombo.highlightedIndex === index
                     }
-                }
-
-                // ── Output layers ──────────────────────────────────────────
-                Item { height: 4 }
-                Label { text: "── Write to ──"; font.bold: true }
-
-                RowLayout {
-                    CheckBox {
-                        id:      fetchWritePts
-                        checked: cfg.appendLayerName !== ""
-                        enabled: cfg.appendLayerName !== ""
-                    }
-                    Label {
-                        text: cfg.appendLayerName !== ""
-                              ? "B  History layer  (" + cfg.appendLayerName + ")"
-                              : "B  History layer  (not configured)"
-                        color: cfg.appendLayerName !== ""
-                               ? Theme.mainTextColor
-                               : Theme.secondaryTextColor
-                        wrapMode:         Text.WordWrap
-                        Layout.fillWidth: true
-                    }
-                }
-
-                RowLayout {
-                    CheckBox {
-                        id:      fetchWriteLns
-                        checked: cfg.lineLayerName !== ""
-                        enabled: cfg.lineLayerName !== ""
-                    }
-                    Label {
-                        text: cfg.lineLayerName !== ""
-                              ? "C  Track line layer  (" + cfg.lineLayerName + ")"
-                              : "C  Track line layer  (not configured)"
-                        color: cfg.lineLayerName !== ""
-                               ? Theme.mainTextColor
-                               : Theme.secondaryTextColor
-                        wrapMode:         Text.WordWrap
-                        Layout.fillWidth: true
-                    }
-                }
-
-                // ── Point layer limit ────────────────────────────────────────
-                Item { height: 4 }
-                Label { text: "── Point Layer Limit ──"; font.bold: true }
-
-                RowLayout {
-                    CheckBox {
-                        id:      fetchLimitPtsCheck
-                        checked: cfg.fetchLimitPts
-                        onCheckedChanged: cfg.fetchLimitPts = checked
-                    }
-                    Label { text: "Limit points written per device"; Layout.fillWidth: true }
-                }
-
-                RowLayout {
-                    Label {
-                        text: "Most recent"
-                        opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
-                    }
-                    SpinBox {
-                        id: fetchMaxPointsSpin
-                        from: 1; to: 100000; stepSize: 50
-                        editable: true
-                        value:   cfg.fetchMaxPoints
-                        enabled: fetchLimitPtsCheck.checked
-                        onValueModified: cfg.fetchMaxPoints = value
-                    }
-                    Label {
-                        text: "points"
-                        opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
+                    ToolButton {
+                        contentItem: Text {
+                            text: "↻"; font.pixelSize: 16
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment:   Text.AlignVCenter
+                        }
+                        background: Item {}
+                        onClicked:  populateEventFeatures()
                     }
                 }
 
                 Label {
-                    text: "Caps how many of the most recent positions per device are written to the point layer (B). The track line layer (C) always uses the full set of positions fetched."
+                    text:    "Window:"
+                    visible: fromFeatureRadio.checked
+                }
+                RadioButton {
+                    id:    betweenRadio
+                    text:  "Between start and end  (end blank → 'now')"
+                    ButtonGroup.group: featureWindowGroup
+                    checked: true
+                    visible: fromFeatureRadio.checked
+                    font.pixelSize: 12
+                }
+                RadioButton {
+                    id:    forwardRadio
+                    text:  "Forward from start +"
+                    ButtonGroup.group: featureWindowGroup
+                    visible: fromFeatureRadio.checked
+                    font.pixelSize: 12
+                }
+                RadioButton {
+                    id:    backwardRadio
+                    text:  "Backward from end −"
+                    ButtonGroup.group: featureWindowGroup
+                    visible: fromFeatureRadio.checked
+                    font.pixelSize: 12
+                }
+                RowLayout {
+                    visible: fromFeatureRadio.checked &&
+                             (forwardRadio.checked || backwardRadio.checked)
+                    Layout.fillWidth: true
+                    Label { text: "Duration:" }
+                    SpinBox {
+                        id:       featureDurationSpin
+                        from:     1
+                        to:       14400
+                        stepSize: 15
+                        value:    120
+                        editable: true
+                    }
+                    Label { text: "min" }
+                }
+                Label {
+                    visible: fromFeatureRadio.checked &&
+                             (forwardRadio.checked || backwardRadio.checked)
+                    text: "Tip: 60 = 1 hour,  120 = 2 hours,  1440 = 1 day"
                     font.pixelSize:   11
                     color:            Theme.secondaryTextColor
                     wrapMode:         Text.WordWrap
                     Layout.fillWidth: true
+                }
+
+                // ── Output layers (read-only info) ─────────────────────────
+                Item { height: 4 }
+                Label {
+                    text: {
+                        var parts = []
+                        if (cfg.appendLayerName !== "") parts.push("B — " + cfg.appendLayerName)
+                        if (cfg.lineLayerName    !== "") parts.push("C — " + cfg.lineLayerName)
+                        return parts.length > 0
+                            ? "Writes to:  " + parts.join(",  ")
+                            : "⚠  No output layers configured — set layers B / C in Settings"
+                    }
+                    color: (cfg.appendLayerName !== "" || cfg.lineLayerName !== "")
+                           ? Theme.secondaryTextColor : "#B71C1C"
+                    font.pixelSize:   11
+                    wrapMode:         Text.WordWrap
+                    Layout.fillWidth: true
+                }
+
+                // ── Advanced (point limit) ──────────────────────────────────
+                Item { height: 4 }
+                Button {
+                    Layout.fillWidth: true
+                    flat:    true
+                    text:    (fetchLogsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — point limit"
+                    onClicked: fetchLogsDialog.advancedOpen = !fetchLogsDialog.advancedOpen
+                }
+
+                ColumnLayout {
+                    visible:          fetchLogsDialog.advancedOpen
+                    Layout.fillWidth: true
+                    spacing:          6
+
+                    RowLayout {
+                        CheckBox {
+                            id:      fetchLimitPtsCheck
+                            checked: cfg.fetchLimitPts
+                            onCheckedChanged: cfg.fetchLimitPts = checked
+                        }
+                        Label { text: "Limit points written per device"; Layout.fillWidth: true }
+                    }
+
+                    RowLayout {
+                        Label {
+                            text: "Most recent"
+                            opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
+                        }
+                        SpinBox {
+                            id: fetchMaxPointsSpin
+                            from: 1; to: 100000; stepSize: 50
+                            editable: true
+                            value:   cfg.fetchMaxPoints
+                            enabled: fetchLimitPtsCheck.checked
+                            onValueModified: cfg.fetchMaxPoints = value
+                        }
+                        Label {
+                            text: "points"
+                            opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
+                        }
+                    }
+
+                    Label {
+                        text: "Caps the most-recent N positions per device written to B. Track layer (C) always gets the full set."
+                        font.pixelSize:   11
+                        color:            Theme.secondaryTextColor
+                        wrapMode:         Text.WordWrap
+                        Layout.fillWidth: true
+                    }
                 }
 
                 // ── Status ─────────────────────────────────────────────────
@@ -1227,6 +1495,77 @@ Item {
                     enabled:          !fetchLogsDialog.fetchLogBusy &&
                                       fetchLogsDialog.fetchDevices.length > 0
                     onClicked:        fetchLogs()
+                }
+
+                // ── Session fetch history ───────────────────────────────────
+                Item { height: 8 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: "── Fetch History ──"; font.bold: true; Layout.fillWidth: true }
+                    Button {
+                        text: "Clear"; flat: true; font.pixelSize: 11
+                        visible: plugin.fetchLog.length > 0
+                        onClicked: plugin.fetchLog = []
+                    }
+                }
+
+                Label {
+                    visible:          plugin.fetchLog.length === 0
+                    Layout.fillWidth: true
+                    text:             "No fetches recorded yet this session."
+                    font.pixelSize:   11
+                    color:            Theme.secondaryTextColor
+                }
+
+                Repeater {
+                    model: {
+                        var arr = []
+                        var log = plugin.fetchLog
+                        for (var i = log.length - 1; i >= 0; i--) arr.push(log[i])
+                        return arr
+                    }
+                    delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight:   histCol.implicitHeight + 8
+                        color:            index % 2 === 0 ? "#EEF2FF" : "white"
+
+                        Column {
+                            id:      histCol
+                            anchors { fill: parent; margins: 5 }
+                            spacing: 2
+
+                            Label {
+                                width:          parent.width
+                                wrapMode:       Text.WordWrap
+                                font.bold:      true
+                                font.pixelSize: 11
+                                text: {
+                                    var tags = modelData.manual ? "manual" : "auto"
+                                    if (modelData.hist) tags += ", history"
+                                    return modelData.ts + "  [" + tags + "]"
+                                        + "  " + modelData.nDevs + " dev"
+                                        + (modelData.nDevs !== 1 ? "s" : "")
+                                        + "  " + modelData.nOnline + " online"
+                                        + "  " + modelData.nPts + " pts"
+                                }
+                            }
+                            Repeater {
+                                model: modelData.devs
+                                delegate: Label {
+                                    width:          parent.width
+                                    wrapMode:       Text.WordWrap
+                                    font.pixelSize: 10
+                                    color: modelData.status === "online"
+                                           ? Theme.mainTextColor : Theme.secondaryTextColor
+                                    text: (modelData.status === "online" ? "● " : "○ ")
+                                        + modelData.name
+                                        + "  pts=" + modelData.pts
+                                        + "  " + modelData.loc
+                                        + "  " + modelData.fix
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Item { height: 8 }
@@ -1290,6 +1629,57 @@ Item {
         })
     }
 
+    // ── Session fetch log ─────────────────────────────────────────────────
+    // Records one entry per fetch (auto + manual) matching the summary format
+    // used by the QGIS desktop plugin's Fetch Log tab.
+    // positions  — the raw positions array for the fetch window
+    // deviceInfo — {devId: {name, status}} lookup
+    // isManual   — true for Fetch Logs dialog, false for timer-based auto fetch
+    // isHist     — true when history mode (pulls a time window), false = snapshot
+    // fromIso / toIso — the UTC range used (empty string if snapshot)
+    function _addToFetchLog(positions, deviceInfo, isManual, isHist, fromIso, toIso) {
+        var ptsByDev  = {}
+        var lastByDev = {}
+        positions.forEach(function(p) {
+            var k = String(p.deviceId)
+            ptsByDev[k] = (ptsByDev[k] || 0) + 1
+            if (!lastByDev[k] || (p.fixTime || "") > (lastByDev[k].fixTime || ""))
+                lastByDev[k] = p
+        })
+        var devRows = []
+        var nOnline = 0
+        for (var devId in deviceInfo) {
+            var info = deviceInfo[devId]
+            if ((info.status || "") === "online") nOnline++
+            var last = lastByDev[String(devId)]
+            devRows.push({
+                name:   info.name   || String(devId),
+                status: info.status || "unknown",
+                pts:    ptsByDev[String(devId)] || 0,
+                loc:    last ? (parseFloat(last.latitude).toFixed(5)
+                                + ", " + parseFloat(last.longitude).toFixed(5)) : "—",
+                fix:    last ? String(last.fixTime || "")
+                                .substring(0, 19).replace("T", " ") : "—"
+            })
+        }
+        devRows.sort(function(a, b) { return a.name.localeCompare(b.name) })
+
+        var entry = {
+            ts:      Qt.formatTime(new Date(), "HH:mm:ss"),
+            manual:  isManual,
+            hist:    isHist,
+            nDevs:   devRows.length,
+            nOnline: nOnline,
+            nPts:    positions.length,
+            fromIso: fromIso || "",
+            toIso:   toIso   || "",
+            devs:    devRows
+        }
+        var log = plugin.fetchLog.slice()
+        log.push(entry)
+        plugin.fetchLog = log
+    }
+
     // Called when all position data (current or historical) is assembled.
     // liveData (optional) — last-known fix array from /api/positions with NO
     //   date range.  When provided (history mode) it is used for the device panel
@@ -1298,6 +1688,7 @@ Item {
     //   In current-positions-only mode liveData is undefined and `positions`
     //   already is the last-known-per-device data, so no extra handling needed.
     function _finalizeFetch(positions, deviceInfo, nowIso, liveData) {
+        var prevFetchIso = cfg.lastFetchIso   // capture before overwriting for log
         // Decide which data feeds the device panel and layer A.
         // liveData (if present) always contains exactly one last-known fix per
         // device — Traccar guarantees this from /api/positions with no filter.
@@ -1332,6 +1723,9 @@ Item {
         if (cfg.appendTrack && cfg.lineLayerName !== "") _updateLineLayer(positions, deviceInfo)
 
         cfg.lastFetchIso = nowIso
+
+        // Record auto-fetch in session log
+        _addToFetchLog(positions, deviceInfo, false, cfg.fetchHistory, prevFetchIso, nowIso)
     }
 
     function testConnection() {
@@ -1364,79 +1758,127 @@ Item {
         })
     }
 
-    // ── Parse "YYYY-MM-DD" text into a local-midnight Date ───────────────
+    // ── Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" text into a local Date ─────
+    // Date-only input → midnight local on that date.
+    // Date+time input → that exact local minute.
     function _parseDate(str) {
-        var p = str.trim().split("-")
+        var s = str.trim()
+        // Split off optional time part
+        var tIdx = s.indexOf(" ")
+        var timePart = (tIdx >= 0) ? s.substring(tIdx + 1).trim() : ""
+        var datePart = (tIdx >= 0) ? s.substring(0, tIdx).trim()  : s
+
+        var p = datePart.split("-")
         if (p.length !== 3) return null
         var y = parseInt(p[0]), m = parseInt(p[1]) - 1, d = parseInt(p[2])
         if (isNaN(y) || isNaN(m) || isNaN(d)) return null
         if (y < 2000 || y > 2099 || m < 0 || m > 11 || d < 1 || d > 31) return null
-        return new Date(y, m, d)
+
+        var hr = 0, mn = 0
+        if (timePart !== "") {
+            var tp = timePart.split(":")
+            hr = parseInt(tp[0]) || 0
+            mn = parseInt(tp[1]) || 0
+            if (isNaN(hr) || isNaN(mn) || hr < 0 || hr > 23 || mn < 0 || mn > 59)
+                return null
+        }
+        return new Date(y, m, d, hr, mn, 0, 0)
     }
 
-    // ── Fetch historical positions for a custom date range ────────────────
+    // ── Fetch historical positions for a custom time period ────────────────
     function fetchLogs() {
         if (fetchLogsDialog.fetchLogBusy) return
 
         var fromIso, toIso
 
-        // ── Quick range (last X minutes/hours/days) takes precedence over the date fields ──
-        var qrIdx     = quickRangeCombo.currentIndex
-        var qrMinutes = (qrIdx > 0) ? timeframeModel.get(qrIdx).minutes : 0
-
-        if (qrMinutes > 0) {
-            var now    = new Date()
-            var fromDt = new Date(now.getTime() - qrMinutes * 60000)
-            fromIso = fromDt.toISOString()
-            toIso   = now.toISOString()
-        } else {
-            var fromDate = _parseDate(fromDateField.text)
-            var toDate   = _parseDate(toDateField.text)
-
-            if (!fromDate || !toDate) {
-                fetchLogsDialog.fetchStatus = "Enter dates as YYYY-MM-DD"
+        if (quickRangeRadio.checked) {
+            // ── Time period ───────────────────────────────────────────────
+            var qrIdx     = quickRangeCombo.currentIndex
+            var qrMinutes = (qrIdx > 0) ? timeframeModel.get(qrIdx).minutes : 0
+            if (qrMinutes <= 0) {
+                fetchLogsDialog.fetchStatus = "Select a time period or switch to Custom dates"
                 return
             }
+            var now = new Date()
+            fromIso = new Date(now.getTime() - qrMinutes * 60000).toISOString()
+            toIso   = now.toISOString()
 
-            // from = 00:00:00 local on from-date
-            // to   = 23:59:59 local on to-date  (covers the whole to-day)
-            var toDateEnd = new Date(toDate.getFullYear(), toDate.getMonth(),
+        } else if (customDatesRadio.checked) {
+            // ── Custom date range ─────────────────────────────────────────
+            var fromDate = _parseDate(fromDateField.text)
+            var toDate   = _parseDate(toDateField.text)
+            if (!fromDate || !toDate) {
+                fetchLogsDialog.fetchStatus = "Enter date/time as YYYY-MM-DD HH:MM (time optional)"
+                return
+            }
+            // If the user entered a date-only "To" (no space → no time), extend to
+            // 23:59:59 so the whole day is included.  If a time was provided, use it exactly.
+            var toHasTime = toDateField.text.trim().indexOf(" ") >= 0
+            var toDateEnd = toHasTime ? toDate
+                          : new Date(toDate.getFullYear(), toDate.getMonth(),
                                      toDate.getDate(), 23, 59, 59, 0)
-
             if (fromDate > toDateEnd) {
                 fetchLogsDialog.fetchStatus = "'From' must not be after 'To'"
                 return
             }
-
             fromIso = fromDate.toISOString()
             toIso   = toDateEnd.toISOString()
+
+        } else {
+            // ── From feature ──────────────────────────────────────────────
+            var fi = eventFeatureCombo.currentIndex
+            if (fi < 0 || eventFeatureModel.count === 0) {
+                fetchLogsDialog.fetchStatus = "Select a feature"
+                return
+            }
+            var feat = eventFeatureModel.get(fi)
+            if (feat.fid < 0) {
+                fetchLogsDialog.fetchStatus = "Configure Event Layer in Settings first"
+                return
+            }
+            if (betweenRadio.checked) {
+                if (feat.startIso === "") {
+                    fetchLogsDialog.fetchStatus = "Selected feature has no start time value"
+                    return
+                }
+                fromIso = new Date(feat.startIso).toISOString()
+                toIso   = feat.endIso !== ""
+                          ? new Date(feat.endIso).toISOString()
+                          : new Date().toISOString()
+            } else if (forwardRadio.checked) {
+                if (feat.startIso === "") {
+                    fetchLogsDialog.fetchStatus = "Selected feature has no start time value"
+                    return
+                }
+                var sd  = new Date(feat.startIso)
+                fromIso = sd.toISOString()
+                toIso   = new Date(sd.getTime() + featureDurationSpin.value * 60000).toISOString()
+            } else {
+                // backwardRadio
+                if (feat.endIso === "") {
+                    fetchLogsDialog.fetchStatus = "Selected feature has no end time value"
+                    return
+                }
+                var ed  = new Date(feat.endIso)
+                toIso   = ed.toISOString()
+                fromIso = new Date(ed.getTime() - featureDurationSpin.value * 60000).toISOString()
+            }
         }
 
-        if (!fetchWritePts.checked && !fetchWriteLns.checked) {
-            fetchLogsDialog.fetchStatus = "Select at least one output layer"
+        if (cfg.appendLayerName === "" && cfg.lineLayerName === "") {
+            fetchLogsDialog.fetchStatus = "No output layers configured — set layers B / C in Settings"
             return
         }
 
-        // Build device ID list and lookup
+        // Build device ID list and lookup — always all devices
         var devs      = fetchLogsDialog.fetchDevices
         var devIds    = []
         var devLookup = {}
-        if (fetchAllDevsCheck.checked) {
-            for (var i = 0; i < devs.length; i++) {
-                devIds.push(devs[i].id)
-                devLookup[devs[i].id] = {
-                    name:   devs[i].name   || String(devs[i].id),
-                    status: devs[i].status || ""
-                }
-            }
-        } else {
-            var idx = fetchDevCombo.currentIndex
-            if (idx >= 0 && idx < devs.length) {
-                devIds.push(devs[idx].id)
-                devLookup[devs[idx].id] = {
-                    name:   devs[idx].name   || String(devs[idx].id),
-                    status: devs[idx].status || ""
-                }
+        for (var i = 0; i < devs.length; i++) {
+            devIds.push(devs[i].id)
+            devLookup[devs[i].id] = {
+                name:   devs[i].name   || String(devs[i].id),
+                status: devs[i].status || ""
             }
         }
 
@@ -1447,6 +1889,17 @@ Item {
 
         fetchLogsDialog.fetchLogBusy = true
         fetchLogsDialog.fetchStatus  = "Fetching " + devIds.length + " device(s)…"
+
+        // Capture display value for auto-tagging when fetching from a feature
+        var featureDisplayValue = ""
+        if (fromFeatureRadio.checked) {
+            var _fi2 = eventFeatureCombo.currentIndex
+            if (_fi2 >= 0 && eventFeatureModel.count > 0) {
+                var _feat2 = eventFeatureModel.get(_fi2)
+                if (_feat2 && _feat2.fid >= 0)
+                    featureDisplayValue = _feat2.disp || ""
+            }
+        }
 
         var fromEnc = encodeURIComponent(fromIso)
         var toEnc   = encodeURIComponent(toIso)
@@ -1464,13 +1917,21 @@ Item {
 
                         // All done — write to layers
                         fetchLogsDialog.fetchLogBusy = false
+                        // Record in session log (even zero results, so user can see the attempt)
+                        _addToFetchLog(allPos, devLookup, true, false, fromIso, toIso)
                         if (allPos.length === 0) {
                             fetchLogsDialog.fetchStatus =
                                 "No positions found in this time range"
                             return
                         }
+
+                        // Auto-tag: override session tag with the feature's display value
+                        // (only when the user has enabled "Use display field as session tag")
+                        if (cfg.useDisplayAsTag && featureDisplayValue !== "")
+                            plugin.fetchTagOverride = featureDisplayValue
+
                         var written = []
-                        if (fetchWritePts.checked && cfg.appendLayerName !== "") {
+                        if (cfg.appendLayerName !== "") {
                             var ptsPos = allPos
                             if (fetchLimitPtsCheck.checked) {
                                 var maxPts = fetchMaxPointsSpin.value
@@ -1493,13 +1954,17 @@ Item {
                                             ? " of " + allPos.length
                                             : ""))
                         }
-                        if (fetchWriteLns.checked && cfg.lineLayerName !== "") {
+                        if (cfg.lineLayerName !== "") {
                             _updateLineLayer(allPos, devLookup)
                             var nDevs = {}
                             for (var j = 0; j < allPos.length; j++)
                                 nDevs[allPos[j].deviceId] = true
                             written.push(Object.keys(nDevs).length + " track(s) updated")
                         }
+
+                        // Clear the override so normal fetches use cfg.sessionTag
+                        plugin.fetchTagOverride = ""
+
                         fetchLogsDialog.fetchStatus =
                             "✓  Done — " + written.join(",  ")
                     }
@@ -1525,188 +1990,12 @@ Item {
     //  SHARED POINT-WRITE HELPER
     // ════════════════════════════════════════════════════════════════════════
 
-    // ════════════════════════════════════════════════════════════════════════
-    //  MINI QGIS-EXPRESSION EVALUATOR (incident_ref auto-fill)
-    //
-    //  Supports a small subset of QGIS expression syntax: string literals
-    //  ('...'), the '||' concatenation operator, and the functions
-    //  now(), today(), and format_date(date_expr, 'format'). This is enough
-    //  to evaluate the project's default expression for fields such as
-    //  incident_ref:  'KMRT-' || format_date(now(),'ddd-dd/MM/yy') || '-1'
-    // ════════════════════════════════════════════════════════════════════════
-
-    readonly property var _exprDaysShort: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
-    readonly property var _exprDaysLong:  ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
-    readonly property var _exprMonShort:  ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    readonly property var _exprMonLong:   ["January","February","March","April","May","June","July","August","September","October","November","December"]
-
-    // Evaluate exprStr and return the resulting string, or null (with a
-    // toast warning) if it cannot be parsed/evaluated. Empty/blank
-    // expressions return null silently (treated as "nothing to write").
-    function _evalIncidentRefExpr(exprStr) {
-        if (!exprStr || exprStr.trim() === "") return null
-        try {
-            var tokens = _tokenizeQgisExpr(exprStr)
-            if (tokens.length === 0) return null
-            var result = _parseConcat(tokens, 0)
-            if (result.pos !== tokens.length)
-                throw new Error("unexpected trailing characters")
-            return _exprToString(result.value)
-        } catch (e) {
-            mainWindow.displayToast("incident_ref expression error: " + e.message)
-            return null
-        }
-    }
-
-    // Convert an evaluated term (string or Date) to its string form.
-    function _exprToString(v) {
-        if (v === null || v === undefined) return ""
-        if (v instanceof Date) return v.toISOString()
-        return String(v)
-    }
-
-    // Split an expression string into STRING / CONCAT / LPAREN / RPAREN /
-    // COMMA / IDENT tokens. Throws on unexpected characters.
-    function _tokenizeQgisExpr(s) {
-        var tokens = []
-        var i = 0
-        while (i < s.length) {
-            var c = s[i]
-            if (c === " " || c === "\t" || c === "\n" || c === "\r") { i++; continue }
-            if (c === "'") {
-                var j = i + 1
-                var str = ""
-                while (j < s.length) {
-                    if (s[j] === "'") {
-                        if (s[j+1] === "'") { str += "'"; j += 2; continue } // escaped '' -> '
-                        break
-                    }
-                    str += s[j]; j++
-                }
-                if (j >= s.length) throw new Error("unterminated string literal")
-                tokens.push({ type: "STRING", value: str })
-                i = j + 1
-                continue
-            }
-            if (c === "|" && s[i+1] === "|") { tokens.push({ type: "CONCAT" }); i += 2; continue }
-            if (c === "(") { tokens.push({ type: "LPAREN" }); i++; continue }
-            if (c === ")") { tokens.push({ type: "RPAREN" }); i++; continue }
-            if (c === ",") { tokens.push({ type: "COMMA" }); i++; continue }
-            if (/[A-Za-z_]/.test(c)) {
-                var k = i + 1
-                while (k < s.length && /[A-Za-z0-9_]/.test(s[k])) k++
-                tokens.push({ type: "IDENT", value: s.substring(i, k) })
-                i = k
-                continue
-            }
-            throw new Error("unexpected character '" + c + "'")
-        }
-        return tokens
-    }
-
-    // term ('||' term)*
-    function _parseConcat(tokens, pos) {
-        var first = _parseTerm(tokens, pos)
-        var value = first.value
-        pos = first.pos
-        while (pos < tokens.length && tokens[pos].type === "CONCAT") {
-            var rhs = _parseTerm(tokens, pos + 1)
-            value = _exprToString(value) + _exprToString(rhs.value)
-            pos = rhs.pos
-        }
-        return { value: value, pos: pos }
-    }
-
-    // STRING | IDENT '(' (concat (',' concat)*)? ')' | '(' concat ')'
-    function _parseTerm(tokens, pos) {
-        if (pos >= tokens.length) throw new Error("unexpected end of expression")
-        var tok = tokens[pos]
-        if (tok.type === "STRING") return { value: tok.value, pos: pos + 1 }
-        if (tok.type === "IDENT") {
-            var name = tok.value.toLowerCase()
-            pos++
-            var args = []
-            if (pos < tokens.length && tokens[pos].type === "LPAREN") {
-                pos++
-                if (pos < tokens.length && tokens[pos].type !== "RPAREN") {
-                    while (true) {
-                        var argRes = _parseConcat(tokens, pos)
-                        args.push(argRes.value)
-                        pos = argRes.pos
-                        if (pos < tokens.length && tokens[pos].type === "COMMA") { pos++; continue }
-                        break
-                    }
-                }
-                if (pos >= tokens.length || tokens[pos].type !== "RPAREN")
-                    throw new Error("expected ')' after arguments to " + name + "()")
-                pos++
-            }
-            return { value: _callExprFunc(name, args), pos: pos }
-        }
-        if (tok.type === "LPAREN") {
-            var inner = _parseConcat(tokens, pos + 1)
-            if (inner.pos >= tokens.length || tokens[inner.pos].type !== "RPAREN")
-                throw new Error("expected ')'")
-            return { value: inner.value, pos: inner.pos + 1 }
-        }
-        throw new Error("unexpected token in expression")
-    }
-
-    // Dispatch supported function calls.
-    function _callExprFunc(name, args) {
-        switch (name) {
-            case "now":
-            case "today":
-                return new Date()
-            case "format_date":
-                if (args.length < 2) throw new Error("format_date() requires 2 arguments")
-                var d = args[0]
-                if (!(d instanceof Date)) d = new Date(d)
-                return _formatQgisDate(d, _exprToString(args[1]))
-            default:
-                throw new Error("unknown function " + name + "()")
-        }
-    }
-
-    // Format a Date using QGIS-style format tokens.
-    function _formatQgisDate(d, fmt) {
-        var pad = function(n, w) {
-            var s = String(n)
-            while (s.length < w) s = "0" + s
-            return s
-        }
-        var tokenRe = /yyyy|yy|MMMM|MMM|MM|M|dddd|ddd|dd|d|HH|H|hh|h|mm|m|ss|s/g
-        return fmt.replace(tokenRe, function(tok) {
-            switch (tok) {
-                case "yyyy": return String(d.getFullYear())
-                case "yy":   return pad(d.getFullYear() % 100, 2)
-                case "MMMM": return _exprMonLong[d.getMonth()]
-                case "MMM":  return _exprMonShort[d.getMonth()]
-                case "MM":   return pad(d.getMonth() + 1, 2)
-                case "M":    return String(d.getMonth() + 1)
-                case "dddd": return _exprDaysLong[d.getDay()]
-                case "ddd":  return _exprDaysShort[d.getDay()]
-                case "dd":   return pad(d.getDate(), 2)
-                case "d":    return String(d.getDate())
-                case "HH":   return pad(d.getHours(), 2)
-                case "H":    return String(d.getHours())
-                case "hh":   return pad((d.getHours() % 12) || 12, 2)
-                case "h":    return String((d.getHours() % 12) || 12)
-                case "mm":   return pad(d.getMinutes(), 2)
-                case "m":    return String(d.getMinutes())
-                case "ss":   return pad(d.getSeconds(), 2)
-                case "s":    return String(d.getSeconds())
-                default:     return tok
-            }
-        })
-    }
 
     function _writePointsToLayer(lyr, positions, deviceInfo) {
-        // Evaluate the auto-fill expression once per call (not per-feature) —
-        // now()/today() should reflect the time of this fetch, not drift
-        // across hundreds of features.
-        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== "")
-            ? _evalIncidentRefExpr(cfg.incidentRefExpr) : null
+        var _tagText = plugin.fetchTagOverride !== "" ? plugin.fetchTagOverride : cfg.sessionTag
+        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== ""
+                                && _tagText !== "")
+                               ? _tagText : null
 
         positions.forEach(function(pos) {
             if (pos.latitude === undefined || pos.longitude === undefined) return
@@ -1741,11 +2030,38 @@ Item {
     }
 
     // ════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════
+    //  CLOUD SYNC GUARD
+    //  QField exposes cloudConnection and cloudProjectsModel via objectName.
+    //  We check cloudConnection.status before any layer write so we never
+    //  call startEditing()/commitChanges() while a cloud sync is in progress.
+    //  Returns true = sync in progress → caller should skip the write.
+    //  Fails silently (returns false) if this is not a cloud project or the
+    //  API is unavailable, so non-cloud use is unaffected.
+    // ════════════════════════════════════════════════════════════════════════
+
+    function _isSyncing() {
+        try {
+            // objectName "cloudConnection" confirmed in QField src/qml/qgismobileapp.qml
+            var cc = mainWindow.findChild("cloudConnection")
+            if (cc === null || cc === undefined) return false
+            // QFieldCloudConnection::ConnectionState — src/core/qfieldcloud/qfieldcloudconnection.h
+            //   Idle = 0, Busy = 1
+            // state goes Busy during any cloud network operation (sync, upload, login).
+            // ConnectionStatus (Disconnected/Connecting/LoggedIn) is a separate property
+            // and has no Synchronizing value — state is the correct check.
+            return cc.state === 1   // ConnectionState::Busy
+        } catch(e) { /* not a cloud project or findChild not available in this build */ }
+        return false
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     //  A: LIVE LAYER  — truncated and repopulated with latest fix per device
     // ════════════════════════════════════════════════════════════════════════
 
     function _updateLiveLayer(positions, deviceInfo) {
         if (cfg.liveLayerName === "") return
+        if (_isSyncing()) { mainWindow.displayToast("Live layer skipped — cloud sync in progress"); return }
         var layers = qgisProject.mapLayersByName(cfg.liveLayerName)
         if (layers.length === 0) {
             mainWindow.displayToast("Live layer '" + cfg.liveLayerName + "' not found")
@@ -1772,6 +2088,7 @@ Item {
 
     function _updateAppendLayer(positions, deviceInfo, forceAppend) {
         if (cfg.appendLayerName === "") return
+        if (_isSyncing()) { mainWindow.displayToast("Accumulated layer skipped — cloud sync in progress"); return }
         var layers = qgisProject.mapLayersByName(cfg.appendLayerName)
         if (layers.length === 0) {
             mainWindow.displayToast("History layer '" + cfg.appendLayerName + "' not found")
@@ -1803,6 +2120,7 @@ Item {
     function _cullAppendLayer() {
         if (cfg.appendLayerName === "") return
         if (!cfg.cullByCount && !cfg.cullByAge) return
+        if (_isSyncing()) return   // silently skip cull — next fetch will retry
         var layers = qgisProject.mapLayersByName(cfg.appendLayerName)
         if (layers.length === 0) return
         var lyr    = layers[0]
@@ -1910,6 +2228,7 @@ Item {
 
     function _updateLineLayer(allPositions, deviceInfo) {
         if (cfg.lineLayerName === "") return
+        if (_isSyncing()) { mainWindow.displayToast("Track layer skipped — cloud sync in progress"); return }
         var layers = qgisProject.mapLayersByName(cfg.lineLayerName)
         if (layers.length === 0) {
             mainWindow.displayToast("Line layer '" + cfg.lineLayerName + "' not found")
@@ -1998,16 +2317,22 @@ Item {
                     newWkt = "LineString (" + vertStr + ", " + vertStr + ")"
                 }
 
+                // Sort pts chronologically before passing for start_time/last_update
+                var sortedPts = pts.slice().sort(function(a, b) {
+                    return (a.fixTime || "") < (b.fixTime || "") ? -1 : 1
+                })
                 _writeLineFeature(lyr, newWkt, parseInt(nk) || -1,
-                                  info.name || nameByDevice[nk] || nk)
+                                  info.name || nameByDevice[nk] || nk,
+                                  sortedPts)
             }
 
             // Devices NOT in this fetch — preserve their existing track unchanged
+            // (no new positions so we pass null for timestamps — preserves existing)
             for (var ek in wktByDevice) {
                 if (processedKeys[ek]) continue
                 var ewkt = wktByDevice[ek]
                 if (!ewkt || ewkt.indexOf("LineString") < 0) continue
-                _writeLineFeature(lyr, ewkt, parseInt(ek) || -1, nameByDevice[ek] || ek)
+                _writeLineFeature(lyr, ewkt, parseInt(ek) || -1, nameByDevice[ek] || ek, null)
             }
 
             lyr.commitChanges()
@@ -2018,17 +2343,33 @@ Item {
         }
     }
 
-    // Helper: create and add one LineString feature
-    function _writeLineFeature(lyr, wkt, deviceId, name) {
+    // Helper: create and add one LineString feature.
+    // Writes device_id, name, start_time, last_update (when those fields exist),
+    // and the optional incident_ref field — matching the QGIS plugin schema.
+    // positions — chronologically sorted array for this device (used for timestamps)
+    function _writeLineFeature(lyr, wkt, deviceId, name, positions) {
         var geom   = GeometryUtils.createGeometryFromWkt(wkt)
         var nf     = FeatureUtils.createFeature(lyr, geom)
         var fnames = lyr.fields.names
-        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== "")
-            ? _evalIncidentRefExpr(cfg.incidentRefExpr) : null
+        var _tagText = plugin.fetchTagOverride !== "" ? plugin.fetchTagOverride : cfg.sessionTag
+        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== ""
+                                && _tagText !== "")
+                               ? _tagText : null
+
+        // Derive start_time / last_update from the positions array when available
+        var startTime  = ""
+        var lastUpdate = ""
+        if (positions && positions.length > 0) {
+            startTime  = String(positions[0].fixTime              || "").substring(0, 19).replace("T", " ")
+            lastUpdate = String(positions[positions.length - 1].fixTime || "").substring(0, 19).replace("T", " ")
+        }
+
         for (var i = 0; i < fnames.length; i++) {
             switch (fnames[i]) {
-                case "device_id": nf.setAttribute(i, deviceId); break
-                case "name":      nf.setAttribute(i, name);     break
+                case "device_id":   nf.setAttribute(i, deviceId);  break
+                case "name":        nf.setAttribute(i, name);       break
+                case "start_time":  if (startTime  !== "") nf.setAttribute(i, startTime);  break
+                case "last_update": if (lastUpdate !== "") nf.setAttribute(i, lastUpdate); break
                 default:
                     if (incidentRefValue !== null && fnames[i] === cfg.incidentRefField)
                         nf.setAttribute(i, incidentRefValue)
@@ -2069,6 +2410,7 @@ Item {
         }
         return out
     }
+
 
     // ════════════════════════════════════════════════════════════════════════
     //  HTTP HELPER
