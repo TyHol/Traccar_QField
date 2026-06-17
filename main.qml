@@ -26,17 +26,17 @@ Item {
         property int    intervalMin:    3
         property bool   liveOn:         false
         property bool   appendTrack:     false   // append vertices to line layer
-        property bool   fetchHistory:    false   // pull all positions since last fetch
+        property bool   fetchHistory:    false   // kept for migration only — no longer used
         property string liveLayerName:   ""     // A — truncated & repopulated each fetch
         property string appendLayerName: ""     // B — positions appended each fetch
         property string lineLayerName:   ""     // C — track line layer
-        property string lastFetchIso:    ""     // internal — timestamp of last successful fetch
+        property string lastFetchIso:    ""     // kept for migration only — no longer used
         // kept for migration only — do not use directly
         property string pointLayerName:  ""
         property bool   appendMode:      false
 
-        property int    fetchMaxPoints:  150     // Fetch Logs: cap on points written per device
-        property bool   fetchLimitPts:   true     // Fetch Logs: whether the cap above is enforced
+        property int    fetchMaxPoints:  150  // Fetch Logs: cap on points written per device
+        property bool   fetchLimitPts:   true  // Fetch Logs: whether the cap above is enforced
 
         // ── Layer B housekeeping (culling) ────────────────────────────────
         property bool   cullByCount:     false    // remove oldest points beyond cullMaxPerDevice (per device)
@@ -317,7 +317,7 @@ Item {
         modal:   true
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.08
+        y:       Math.max(52, (mainWindow.height - height) * 0.08)
 
         header: ToolBar {
             background: Rectangle { color: "#1565C0" }
@@ -487,7 +487,7 @@ Item {
         title:   "Traccar Live — Help"
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.06
+        y:       Math.max(52, (mainWindow.height - height) * 0.06)
 
         standardButtons: Dialog.Ok
         onAccepted: mainDialog.open()
@@ -500,7 +500,7 @@ Item {
 
             ColumnLayout {
                 width:   parent.width
-                spacing: 8
+                spacing: 4
 
                 Label {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
@@ -551,7 +551,7 @@ Item {
                           "is used automatically if 'Use display field as tag' is enabled."
                 }
 
-                Item { height: 4 }
+                Item { height: 2 }
             }
         }
     }
@@ -566,7 +566,7 @@ Item {
         modal:   true
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
-        y:       mainWindow.height * 0.02     // near top so Save is reachable
+        y:       Math.max(52, mainWindow.height * 0.04)  // clear status bar; near top so Save is reachable
 
         header: ToolBar {
             background: Rectangle { color: "#1565C0" }
@@ -596,7 +596,6 @@ Item {
         property bool advancedOpen:    false
         property bool localUseDisplay: false   // shared between Feature page and Session Tag page
 
-        // No standardButtons — Save/Cancel live inside the ScrollView
         footer: Item { height: 0 }
 
         // Populate controls from current config when dialog opens
@@ -700,8 +699,6 @@ Item {
                                 ? _evE.name : ""
             if (refreshTimer.running) refreshTimer.restart()
             mainWindow.displayToast("Settings saved")
-            settingsDialog.close()
-            mainDialog.open()
         }
 
         // ── Section selector + paged content ──────────────────────────────
@@ -709,18 +706,21 @@ Item {
 
         ScrollView {
             width:        parent.width
-            height:       Math.min(implicitHeight, mainWindow.height * 0.88)
+            height:       mainWindow.height * 0.78
             contentWidth: parent.width
+            clip:         true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
                 width:   parent.width
-                spacing: 8
+                spacing: 4
 
-                // ── Radio nav (single row) ─────────────────────────────────
-                RowLayout {
+                // ── Radio nav (2×2 grid) ───────────────────────────────────
+                GridLayout {
                     Layout.fillWidth: true
-                    spacing:          0
+                    columns:          2
+                    columnSpacing:    0
+                    rowSpacing:       0
 
                     RadioButton {
                         id:    s1Radio
@@ -728,28 +728,24 @@ Item {
                         checked: true
                         ButtonGroup.group: settingsSectionGroup
                         Layout.fillWidth: true
-                        font.pixelSize:   11
                     }
                     RadioButton {
                         id:    s2Radio
                         text:  "Layers"
                         ButtonGroup.group: settingsSectionGroup
                         Layout.fillWidth: true
-                        font.pixelSize:   11
                     }
                     RadioButton {
                         id:    s3Radio
                         text:  "Feature"
                         ButtonGroup.group: settingsSectionGroup
                         Layout.fillWidth: true
-                        font.pixelSize:   11
                     }
                     RadioButton {
                         id:    s4Radio
                         text:  "Session Tag"
                         ButtonGroup.group: settingsSectionGroup
                         Layout.fillWidth: true
-                        font.pixelSize:   11
                     }
                 }
 
@@ -757,7 +753,7 @@ Item {
                 ColumnLayout {
                     visible:          s1Radio.checked
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing:          3
 
                     Label { text: "Server URL:" }
                     TextField {
@@ -783,28 +779,13 @@ Item {
                         SpinBox { id: intervalSpin; from: 1; to: 120; value: 3 }
                         Label   { text: "min" }
                     }
-                    RowLayout {
-                        CheckBox {
-                            id: histCheck
-                            checked: cfg.fetchHistory
-                            onCheckedChanged: cfg.fetchHistory = checked
-                        }
-                        Label {
-                            text: "Fetch full track history between refreshes"
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                            font.pixelSize: 12
-                        }
-                    }
                     Label {
-                        visible:          cfg.fetchHistory
                         Layout.fillWidth: true
                         wrapMode:         Text.WordWrap
                         font.pixelSize:   11
                         color:            Theme.secondaryTextColor
-                        text: "Each auto-fetch pulls every GPS fix since the last fetch " +
-                              "(one API call per device). Intermediate points go to B and C. " +
-                              "Disable to fetch current positions only."
+                        text: "Each refresh fetches the current position only (1 per device). " +
+                              "Use the Fetch button for historical bulk pulls."
                     }
                     Button {
                         text:             "Test Connection"
@@ -822,7 +803,7 @@ Item {
                 ColumnLayout {
                     visible:          s2Radio.checked
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing:          3
 
                     Label {
                         text: "A — Live points\nCleared and replaced on every fetch. One point per device."
@@ -906,12 +887,12 @@ Item {
                     // Advanced — culling
                     Button {
                         Layout.fillWidth: true; flat: true
-                        text: (settingsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — layer B housekeeping"
+                        text: (settingsDialog.advancedOpen ? "-" : "+") + "  Advanced — layer B housekeeping"
                         onClicked: settingsDialog.advancedOpen = !settingsDialog.advancedOpen
                     }
                     ColumnLayout {
                         visible: settingsDialog.advancedOpen
-                        Layout.fillWidth: true; spacing: 6
+                        Layout.fillWidth: true; spacing: 3
                         Label {
                             text: "Automatically trim layer B after each live fetch."
                             font.pixelSize: 11; color: Theme.secondaryTextColor
@@ -959,7 +940,7 @@ Item {
                 ColumnLayout {
                     visible:          s3Radio.checked
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing:          3
 
                     Label {
                         text: "Pick a layer and date/time fields so Fetch Logs can derive " +
@@ -1047,7 +1028,7 @@ Item {
                         }
                     }
 
-                    Item { height: 4 }
+                    Item { height: 2 }
                     RowLayout {
                         CheckBox {
                             id: useAsTagCheck
@@ -1076,7 +1057,7 @@ Item {
                 ColumnLayout {
                     visible:          s4Radio.checked
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing:          3
 
                     Label {
                         text: "Stamp a text tag on every point and track written to layers A, B and C."
@@ -1106,9 +1087,11 @@ Item {
                         opacity:         enabled ? 1.0 : 0.6
                     }
                     Label {
-                        text: "Write tag into field  (on layer B — accumulated points):"
+                        text: "Write tag into field  (layer B — accumulated points):"
                         enabled: incidentRefCheck.checked
                         opacity: enabled ? 1.0 : 0.6
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
                     }
                     ComboBox {
                         id: incidentRefFieldCombo
@@ -1127,7 +1110,7 @@ Item {
                             highlighted: incidentRefFieldCombo.highlightedIndex === index
                         }
                     }
-                    Item { height: 4 }
+                    Item { height: 2 }
                     RowLayout {
                         enabled: incidentRefCheck.checked
                         opacity: enabled ? 1.0 : 0.6
@@ -1149,26 +1132,19 @@ Item {
                         font.pixelSize: 11; color: Theme.secondaryTextColor
                         wrapMode: Text.WordWrap; Layout.fillWidth: true
                     }
-                }
+                }   // end Session Tag ColumnLayout
 
-                // ── Save / Cancel (always visible) ─────────────────────────
-                Item { height: 8 }
-                RowLayout {
+                Item { height: 4 }
+                Button {
                     Layout.fillWidth: true
-                    spacing: 8
-                    Button {
-                        text: "Cancel"; Layout.fillWidth: true
-                        onClicked: { settingsDialog.close(); mainDialog.open() }
-                    }
-                    Button {
-                        text: "Save"; Layout.fillWidth: true
-                        onClicked: settingsDialog.saveSettings()
-                    }
+                    text: "Save"
+                    onClicked: settingsDialog.saveSettings()
                 }
                 Item { height: 8 }
-            }
-        }
-    }
+
+            }   // end outer ColumnLayout
+        }   // end ScrollView
+    }   // end settingsDialog
 
     // ════════════════════════════════════════════════════════════════════════
     //  FETCH LOGS DIALOG
@@ -1180,7 +1156,7 @@ Item {
         modal:   true
         width:   Math.min(mainWindow.width * 0.92, 420)
         x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.08
+        y:       Math.max(52, (mainWindow.height - height) * 0.08)
 
         // Runtime state
         property var    fetchDevices:  []
@@ -1240,7 +1216,7 @@ Item {
 
             ColumnLayout {
                 width:   parent.width
-                spacing: 6
+                spacing: 3
 
                 // ── Time window ────────────────────────────────────────────
                 Label {
@@ -1248,28 +1224,32 @@ Item {
                     font.bold: true
                 }
 
-                // Mode selector
-                RowLayout {
+                // Mode selector (2-column grid so labels don't truncate)
+                GridLayout {
                     Layout.fillWidth: true
+                    columns:      2
+                    columnSpacing: 0
+                    rowSpacing:    0
                     RadioButton {
                         id:    quickRangeRadio
                         text:  "Time period"
                         ButtonGroup.group: rangeMode
                         checked: true
-                        font.pixelSize: 12
+                        Layout.fillWidth: true
                     }
                     RadioButton {
                         id:    customDatesRadio
                         text:  "Custom dates"
                         ButtonGroup.group: rangeMode
-                        font.pixelSize: 12
+                        Layout.fillWidth: true
                     }
                     RadioButton {
                         id:    fromFeatureRadio
                         text:  "From feature"
                         ButtonGroup.group: rangeMode
-                        font.pixelSize: 12
+                        Layout.fillWidth: true
                     }
+                    Item { Layout.fillWidth: true }
                 }
 
                 // ── Time period ────────────────────────────────────────────
@@ -1347,7 +1327,7 @@ Item {
                     }
                     ToolButton {
                         contentItem: Text {
-                            text: "↻"; font.pixelSize: 16
+                            text: "🔄"; font.pixelSize: 14
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment:   Text.AlignVCenter
                         }
@@ -1408,7 +1388,7 @@ Item {
                 }
 
                 // ── Output layers (read-only info) ─────────────────────────
-                Item { height: 4 }
+                Item { height: 2 }
                 Label {
                     text: {
                         var parts = []
@@ -1426,18 +1406,18 @@ Item {
                 }
 
                 // ── Advanced (point limit) ──────────────────────────────────
-                Item { height: 4 }
+                Item { height: 2 }
                 Button {
                     Layout.fillWidth: true
                     flat:    true
-                    text:    (fetchLogsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — point limit"
+                    text:    (fetchLogsDialog.advancedOpen ? "-" : "+") + "  Advanced — point limit"
                     onClicked: fetchLogsDialog.advancedOpen = !fetchLogsDialog.advancedOpen
                 }
 
                 ColumnLayout {
                     visible:          fetchLogsDialog.advancedOpen
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing:          3
 
                     RowLayout {
                         CheckBox {
@@ -1477,7 +1457,7 @@ Item {
                 }
 
                 // ── Status ─────────────────────────────────────────────────
-                Item { height: 4 }
+                Item { height: 2 }
                 Label {
                     text:             fetchLogsDialog.fetchStatus
                     wrapMode:         Text.WordWrap
@@ -1498,7 +1478,7 @@ Item {
                 }
 
                 // ── Session fetch history ───────────────────────────────────
-                Item { height: 8 }
+                Item { height: 3 }
                 RowLayout {
                     Layout.fillWidth: true
                     Label { text: "── Fetch History ──"; font.bold: true; Layout.fillWidth: true }
@@ -1568,7 +1548,7 @@ Item {
                     }
                 }
 
-                Item { height: 8 }
+                Item { height: 3 }
             }
         }
     }
@@ -1588,44 +1568,11 @@ Item {
             })
             plugin.deviceInfo = lookup
 
-            var nowIso  = new Date().toISOString()
-            var devIds  = Object.keys(lookup)
-
-            // ── History mode: pull every fix since the last fetch ─────────
-            if (cfg.fetchHistory && cfg.lastFetchIso !== "" && devIds.length > 0) {
-                var allPos  = []
-                var pending = devIds.length
-                var fromEnc = encodeURIComponent(cfg.lastFetchIso)
-                var toEnc   = encodeURIComponent(nowIso)
-
-                devIds.forEach(function(rawId) {
-                    // IIFE keeps rawId in closure correctly
-                    ;(function(devId) {
-                        _get("/api/positions?deviceId=" + devId
-                                + "&from=" + fromEnc + "&to=" + toEnc,
-                            function(hist) {
-                                for (var i = 0; i < hist.length; i++) allPos.push(hist[i])
-                                pending--
-                                if (pending === 0) {
-                                    // Always fetch last-known position for ALL devices
-                                    // (incl. offline ones not in the history window) for
-                                    // layer A and the device panel.
-                                    _get("/api/positions", function(liveData) {
-                                        _finalizeFetch(allPos, lookup, nowIso, liveData)
-                                    })
-                                }
-                            }
-                        )
-                    })(rawId)
-                })
-            } else {
-                // ── Current-positions-only mode ───────────────────────────
-                // /api/positions (no range) already returns the last-known fix
-                // for every device including offline — no extra call needed.
-                _get("/api/positions", function(posData) {
-                    _finalizeFetch(posData, lookup, nowIso)
-                })
-            }
+            // Always fetch current positions only — last known fix per device.
+            // Bulk historical pulls are handled by the Fetch dialog, not here.
+            _get("/api/positions", function(posData) {
+                _finalizeFetch(posData, lookup, new Date().toISOString())
+            })
         })
     }
 
@@ -1687,45 +1634,26 @@ Item {
     //   still appear at their last known location.
     //   In current-positions-only mode liveData is undefined and `positions`
     //   already is the last-known-per-device data, so no extra handling needed.
-    function _finalizeFetch(positions, deviceInfo, nowIso, liveData) {
-        var prevFetchIso = cfg.lastFetchIso   // capture before overwriting for log
-        // Decide which data feeds the device panel and layer A.
-        // liveData (if present) always contains exactly one last-known fix per
-        // device — Traccar guarantees this from /api/positions with no filter.
-        var liveSource = (liveData && liveData.length > 0) ? liveData : positions
-
-        // Latest fix per device → shown in the device list
-        var latestByDevice = {}
-        for (var i = 0; i < liveSource.length; i++) {
-            var pos = liveSource[i]
-            var k   = pos.deviceId
-            if (!latestByDevice[k] ||
-                    (pos.fixTime || "") > (latestByDevice[k].fixTime || ""))
-                latestByDevice[k] = pos
-        }
-        var latest = []
-        for (var key in latestByDevice) latest.push(latestByDevice[key])
-
-        plugin.positions   = latest
+    function _finalizeFetch(positions, deviceInfo, nowIso) {
+        // positions = current fix per device from /api/positions (no date range)
+        // Traccar returns exactly one entry per device — the last known fix.
+        plugin.positions   = positions
         plugin.fetchBusy   = false
         plugin.lastFetched = Qt.formatTime(new Date(), "hh:mm:ss")
-                           + "  -  " + latest.length + " device(s)"
-        if (positions.length > latest.length)
-            plugin.lastFetched += "  (" + positions.length + " pts)"
+                           + "  -  " + positions.length + " device(s)"
 
-        // A: live layer — always fed from last-known positions (incl. offline)
-        if (cfg.liveLayerName   !== "") _updateLiveLayer(latest,    deviceInfo)
-        // B+C: fed from the history range (or current positions in non-history mode)
+        // A: replace with latest fix per device
+        if (cfg.liveLayerName   !== "") _updateLiveLayer(positions, deviceInfo)
+        // B: append latest fix per device
         if (cfg.appendLayerName !== "") {
             _updateAppendLayer(positions, deviceInfo)
             if (cfg.cullByCount || cfg.cullByAge) _cullAppendLayer()
         }
+        // C: extend track with latest fix
         if (cfg.appendTrack && cfg.lineLayerName !== "") _updateLineLayer(positions, deviceInfo)
 
-        cfg.lastFetchIso = nowIso
-
-        // Record auto-fetch in session log
-        _addToFetchLog(positions, deviceInfo, false, cfg.fetchHistory, prevFetchIso, nowIso)
+        // Record in session log
+        _addToFetchLog(positions, deviceInfo, false, false, "", nowIso)
     }
 
     function testConnection() {
@@ -2223,7 +2151,7 @@ Item {
     //  Strategy: read-all → clear-all → rebuild
     //  This avoids selectByExpression during editing (unreliable in QML).
     //  Accepts an array of positions which may contain multiple entries per
-    //  device (when fetchHistory is enabled) — all are appended in time order.
+    //  device — all are appended in time order.
     // ════════════════════════════════════════════════════════════════════════
 
     function _updateLineLayer(allPositions, deviceInfo) {
@@ -2260,7 +2188,9 @@ Item {
         }
 
         // ── Phase 2: group new positions by device, sorted by GPS time ────
-        var newByDevice = {}    // String(deviceId) → [{x, y, fixTime}, ...]
+        // Each point stores x/y (layer CRS), z (altitude m), m (epoch seconds),
+        // and t (ISO fixTime string for field writes and sorting).
+        var newByDevice = {}    // String(deviceId) → [{x, y, z, m, t}, ...]
         for (var pi = 0; pi < allPositions.length; pi++) {
             var pos = allPositions[pi]
             if (pos.latitude === undefined || pos.longitude === undefined) continue
@@ -2277,8 +2207,10 @@ Item {
                 }
             } catch(ep) {}
 
+            var pz = pos.altitude || 0
+            var pm = pos.fixTime ? Math.round(new Date(pos.fixTime).getTime() / 1000) : 0
             if (!newByDevice[key]) newByDevice[key] = []
-            newByDevice[key].push({ x: px, y: py, t: pos.fixTime || "" })
+            newByDevice[key].push({ x: px, y: py, z: pz, m: pm, t: pos.fixTime || "" })
         }
         // Sort each device's points chronologically
         for (var dk in newByDevice) {
@@ -2300,30 +2232,31 @@ Item {
                 var info  = deviceInfo[parseInt(nk)] || deviceInfo[nk] || {}
                 var oldWkt = wktByDevice[nk] || ""
 
-                // Build vertex string from new points
-                var newVerts = []
-                for (var vi = 0; vi < pts.length; vi++)
-                    newVerts.push(pts[vi].x + " " + pts[vi].y)
-                var vertStr = newVerts.join(", ")
-
-                var newWkt
-                if (oldWkt.indexOf("LineString") >= 0) {
-                    // Append vertices to end of existing line
-                    newWkt = oldWkt.replace(/\)\s*$/, ", " + vertStr + ")")
-                } else if (newVerts.length >= 2) {
-                    newWkt = "LineString (" + vertStr + ")"
-                } else {
-                    // Single point — degenerate 2-pt placeholder
-                    newWkt = "LineString (" + vertStr + ", " + vertStr + ")"
+                // Parse existing WKT coords (handles 2D / Z / M / ZM gracefully)
+                var oldCoords = _extractZMCoords(oldWkt)
+                var allVerts  = []
+                for (var oi = 0; oi < oldCoords.length; oi++) {
+                    var oc = oldCoords[oi]
+                    allVerts.push(oc.x + " " + oc.y + " " + oc.z + " " + oc.m)
+                }
+                for (var vi = 0; vi < pts.length; vi++) {
+                    var pt = pts[vi]
+                    allVerts.push(pt.x + " " + pt.y + " " + pt.z + " " + pt.m)
                 }
 
-                // Sort pts chronologically before passing for start_time/last_update
-                var sortedPts = pts.slice().sort(function(a, b) {
-                    return (a.fixTime || "") < (b.fixTime || "") ? -1 : 1
-                })
+                var newWkt
+                if (allVerts.length >= 2) {
+                    newWkt = "LineStringZM (" + allVerts.join(", ") + ")"
+                } else if (allVerts.length === 1) {
+                    newWkt = "LineStringZM (" + allVerts[0] + ", " + allVerts[0] + ")"
+                } else {
+                    continue   // nothing to write for this device
+                }
+
+                // pts is already sorted chronologically (Phase 2 sort above)
                 _writeLineFeature(lyr, newWkt, parseInt(nk) || -1,
                                   info.name || nameByDevice[nk] || nk,
-                                  sortedPts)
+                                  pts)
             }
 
             // Devices NOT in this fetch — preserve their existing track unchanged
@@ -2341,6 +2274,28 @@ Item {
             try { lyr.rollBack() } catch(e2) {}
             mainWindow.displayToast("Line layer error: " + e)
         }
+    }
+
+    // Helper: extract coordinates from any LineString WKT (2D, Z, M, or ZM).
+    // Returns [{x, y, z, m}, ...] — missing z/m default to 0.
+    // Used so old 2D tracks migrate cleanly into LineStringZM on next write.
+    function _extractZMCoords(wkt) {
+        if (!wkt || wkt.indexOf("LineString") < 0) return []
+        var rx = wkt.match(/\(([^)]+)\)/)
+        if (!rx) return []
+        var parts = rx[1].trim().split(/\s*,\s*/)
+        var coords = []
+        for (var i = 0; i < parts.length; i++) {
+            var nums = parts[i].trim().split(/\s+/)
+            if (nums.length >= 2)
+                coords.push({
+                    x: parseFloat(nums[0]) || 0,
+                    y: parseFloat(nums[1]) || 0,
+                    z: nums.length >= 3 ? (parseFloat(nums[2]) || 0) : 0,
+                    m: nums.length >= 4 ? (parseFloat(nums[3]) || 0) : 0
+                })
+        }
+        return coords
     }
 
     // Helper: create and add one LineString feature.
