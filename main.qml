@@ -1973,24 +1973,31 @@ Item {
     // kind — "positions saved" / "tracks fetched" / "tracks saved"
     // fromIso / toIso — the UTC window used (empty string for a snapshot)
     function _addToFetchLog(positions, deviceInfo, kind, fromIso, toIso) {
-        var ptsByDev  = {}
-        var lastByDev = {}
+        var ptsByDev   = {}
+        var firstByDev = {}
+        var lastByDev  = {}
         positions.forEach(function(p) {
             var k = String(p.deviceId)
             ptsByDev[k] = (ptsByDev[k] || 0) + 1
+            if (!firstByDev[k] || (p.fixTime || "") < (firstByDev[k].fixTime || ""))
+                firstByDev[k] = p
             if (!lastByDev[k] || (p.fixTime || "") > (lastByDev[k].fixTime || ""))
                 lastByDev[k] = p
         })
         var devRows = []
         for (var devId in deviceInfo) {
-            var info = deviceInfo[devId]
-            var last = lastByDev[String(devId)]
+            var info  = deviceInfo[devId]
+            var first = firstByDev[String(devId)]
+            var last  = lastByDev[String(devId)]
             devRows.push({
                 name:   info.name   || String(devId),
                 pts:    ptsByDev[String(devId)] || 0,
                 loc:    last ? (parseFloat(last.latitude).toFixed(5)
                                 + ", " + parseFloat(last.longitude).toFixed(5)) : "—",
-                fix:    last ? _fmtLocal(last.fixTime) : "—"
+                // single fix → its time; several → first–last fix time
+                fix:    !last ? "—"
+                        : (ptsByDev[String(devId)] > 1 ? _spanText(first.fixTime, last.fixTime)
+                                                        : _fmtLocal(last.fixTime))
             })
         }
         devRows.sort(function(a, b) { return a.name.localeCompare(b.name) })
@@ -2006,6 +2013,34 @@ Item {
             devs:    devRows
         })
         plugin.fetchLog = log
+    }
+
+    // "09:09 – 09:22" (same day as today), otherwise with dates; local time
+    function _spanText(fromIso, toIso) {
+        var a = new Date(fromIso), b = new Date(toIso)
+        if (isNaN(a.getTime()) || isNaN(b.getTime())) return "—"
+        var today   = Qt.formatDate(new Date(), "yyyy-MM-dd")
+        var sameDay = Qt.formatDate(a, "yyyy-MM-dd") === Qt.formatDate(b, "yyyy-MM-dd")
+        if (sameDay && Qt.formatDate(a, "yyyy-MM-dd") === today)
+            return Qt.formatTime(a, "HH:mm") + " – " + Qt.formatTime(b, "HH:mm")
+        if (sameDay)
+            return Qt.formatDateTime(a, "dd MMM HH:mm") + " – " + Qt.formatTime(b, "HH:mm")
+        return Qt.formatDateTime(a, "dd MMM HH:mm") + " – " + Qt.formatDateTime(b, "dd MMM HH:mm")
+    }
+
+    // One line per device for the fetch result: what each device actually has in the window
+    function _deviceSpanLines(byDev, devLookup) {
+        var rows = []
+        for (var devId in devLookup) {
+            var name = devLookup[devId].name || String(devId)
+            var pts  = byDev[String(devId)]
+            rows.push({ name: name, text: (pts && pts.length > 0)
+                ? "• " + name + ": " + pts.length + " pts, "
+                  + _spanText(pts[0].fixTime, pts[pts.length - 1].fixTime)
+                : "• " + name + ": no fixes in this window" })
+        }
+        rows.sort(function(a, b) { return a.name.localeCompare(b.name) })
+        return rows.map(function(r) { return r.text }).join("\n")
     }
 
     function _fmtLocal(iso) {
@@ -2164,6 +2199,7 @@ Item {
             fetchLogsDialog.fetchStatus = nTracks + " track(s), " + allPos.length + " pts — "
                 + _fmtLocal(win.fromIso) + " → " + _fmtLocal(win.toIso)
                 + (failed > 0 ? "  (" + failed + " device request(s) failed)" : "")
+                + "\n" + _deviceSpanLines(byDev, devLookup)
                 + "\nShown dashed on the map. Tap Save to write to the tracks layer."
         }
 
