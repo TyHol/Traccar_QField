@@ -52,10 +52,10 @@ def _fix(dev, t, lon, lat, i):
 
 POS = {1: [], 2: [], 3: []}
 for i in range(240):
-    POS[1].append(_fix(1, NOW - timedelta(seconds=30 * (239 - i)), -9.50 + i * 0.0001, 52.05 + i * 0.00005, i))
+    POS[1].append(_fix(1, NOW - timedelta(seconds=30 * (239 - i)), -6.33 + i * 0.0001, 53.355 + i * 0.00005, i))
 VAN_START = NOW - timedelta(days=2)
 for i in range(20):
-    POS[2].append(_fix(2, VAN_START + timedelta(seconds=30 * i), -9.40 + i * 0.0002, 52.10, i))
+    POS[2].append(_fix(2, VAN_START + timedelta(seconds=30 * i), -6.25 + i * 0.0002, 53.35, i))
 
 
 def _p(s):
@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/test/addfix":                    # test hook: a new live fix
             d = int(q["dev"][0])
             n = len(POS[d])
-            POS[d].append(_fix(d, datetime.now(timezone.utc) + timedelta(seconds=1), -9.47, 52.06, 1000 + n))
+            POS[d].append(_fix(d, datetime.now(timezone.utc) - timedelta(seconds=1), -6.31, 53.365, 1000 + n))
             return self._send(200, {})
         auth = "Basic " + base64.b64encode(("%s:%s" % (USER, PWD)).encode()).decode()
         if self.headers.get("Authorization", "") != auth:

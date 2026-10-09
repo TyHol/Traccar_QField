@@ -1,3 +1,6 @@
+# Copyright (C) 2026 TyHol
+# SPDX-License-Identifier: GPL-2.0-or-later
+
 """
 Create traccar_template.gpkg — empty points and tracks layers with every field
 the Traccar Live plugin fills. Add both layers to your QGIS project, then pick
