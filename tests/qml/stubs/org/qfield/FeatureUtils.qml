@@ -6,8 +6,8 @@ QtObject {
         for (var i = 0; i < layer.fields.names.length; i++) attrs.push(null)
         return {
             id: -1, geometry: geometry, attrs: attrs,
-            setAttribute: function(i, v) { this.attrs[i] = v },
-            attribute: function(name) { return this.attrs[layer.fields.names.indexOf(name)] }
+            setAttribute: function(i, v) { attrs[i] = v },
+            attribute: function(name) { return attrs[layer.fields.names.indexOf(name)] }
         }
     }
 }
