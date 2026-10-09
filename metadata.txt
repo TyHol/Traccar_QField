@@ -1,6 +1,6 @@
 [general]
 name=Traccar Live
-version=0.4.0
+version=0.4.1
 qfieldMinimumVersion=3.3
 author=TyHol
 email=itonyholmes@gmail.com

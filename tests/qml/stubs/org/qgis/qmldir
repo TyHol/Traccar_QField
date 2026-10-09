@@ -1,0 +1,2 @@
+module org.qgis
+singleton Qgis 1.0 Qgis.qml

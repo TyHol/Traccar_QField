@@ -121,6 +121,7 @@ Item {
     property var    trackModel:   []      // track lines (decimated for drawing)
     property bool   loading:      false
     property double loadStarted:  0
+    property int    loadGen:      0       // bumped by every load; late replies from older loads are ignored
     property string lastFetched:  ""
     property string liveError:    ""
     property string statusMsg:    ""      // window / loading hint under the time window
@@ -1655,25 +1656,29 @@ Item {
 
     function reloadWindow() {
         clearWindow()
-        loadWindow()
+        loadWindow(true)
     }
 
-    // Full load: devices, current fixes, and every fix in the window per device
-    function loadWindow() {
-        if (plugin.loading && Date.now() - plugin.loadStarted < 60000) return
+    // Full load: devices, current fixes, and every fix in the window per device.
+    // force = a new window was chosen: start over even if a load is still running.
+    function loadWindow(force) {
+        if (!force && plugin.loading && Date.now() - plugin.loadStarted < 60000) return
         var w = _computeWindow()
-        if (w.error) { plugin.statusMsg = w.error; return }
+        if (w.error) { plugin.statusMsg = w.error; plugin.loading = false; return }
+        var gen = ++plugin.loadGen
         plugin.statusMsg   = "Loading…"
         plugin.loading     = true
         plugin.loadStarted = Date.now()
 
         var onErr = function(msg) {
+            if (gen !== plugin.loadGen) return
             plugin.loading   = false
             plugin.statusMsg = ""
             plugin.liveError = msg
         }
 
         _get("/api/devices", function(devData) {
+            if (gen !== plugin.loadGen) return
             var lookup = _lookupFromDevices(devData)
             plugin.deviceInfo = lookup
             plugin.connState  = "ok"
@@ -1686,6 +1691,7 @@ Item {
                 var pending = ids.length
                 var done = function() {
                     if (--pending > 0) return
+                    if (gen !== plugin.loadGen) return      // superseded by a newer load
                     plugin.loading     = false
                     plugin.liveError   = failed > 0 ? failed + " device(s) could not be loaded" : ""
                     plugin.statusMsg   = ""
@@ -1721,10 +1727,14 @@ Item {
         if (plugin.win === null) { loadWindow(); return }
         if (!plugin.win.moving) return
 
-        var onErr = function(msg) { plugin.liveError = msg }
+        var gen   = plugin.loadGen
+        var stale = function() { return gen !== plugin.loadGen || plugin.loading || plugin.win === null }
+        var onErr = function(msg) { if (!stale()) plugin.liveError = msg }
         _get("/api/devices", function(devData) {
+            if (stale()) return
             plugin.deviceInfo = _lookupFromDevices(devData)
             _get("/api/positions", function(posData) {
+                if (stale()) return                 // window changed while this was in flight
                 var w      = plugin.win
                 var now    = new Date()
                 var endMs  = w.endLimitIso !== "" ? new Date(w.endLimitIso).getTime() : Infinity
@@ -1897,7 +1907,8 @@ Item {
             try {
                 lyr.startEditing()
                 var n = _writePointsToLayer(lyr, positions, lookup, tag)
-                if (!lyr.commitChanges()) throw "commit failed"
+                if (n === 0) throw "the layer did not accept the points"
+                if (!lyr.commitChanges()) throw "the layer could not save the points"
                 lyr.triggerRepaint()
                 mainWindow.displayToast("✓ Saved " + n + " point(s) to " + cfg.pointsLayerName)
             } catch(e) {
@@ -1969,17 +1980,22 @@ Item {
             lyr.startEditing()
             for (var i = 0; i < oldFids.length; i++) lyr.deleteFeature(oldFids[i])
 
+            // QGIS adds a missing Z / M on commit but never drops one, so a ZM line is
+            // rejected by a 2D (or Z-only) layer: build exactly the layer's dimensions.
+            var dims = _layerDims(lyr)
             for (var devKey in byDev) {
                 var pts = byDev[devKey]
                 var verts = []
                 for (var j = 0; j < pts.length; j++) {
                     var xy = _xyForLayer(lyr, pts[j].longitude, pts[j].latitude)
-                    var z  = pts[j].altitude || 0
-                    var m  = Math.round(new Date(pts[j].fixTime).getTime() / 1000)
-                    verts.push(xy.x + " " + xy.y + " " + z + " " + m)
+                    var v  = xy.x + " " + xy.y
+                    if (dims.z) v += " " + (pts[j].altitude || 0)
+                    if (dims.m) v += " " + Math.round(new Date(pts[j].fixTime).getTime() / 1000)
+                    verts.push(v)
                 }
                 if (verts.length === 1) verts.push(verts[0])   // a line needs two vertices
-                var geom  = GeometryUtils.createGeometryFromWkt("LineStringZM (" + verts.join(", ") + ")")
+                var geom  = GeometryUtils.createGeometryFromWkt(
+                    "LineString" + dims.tag + " (" + verts.join(", ") + ")")
                 var feat  = FeatureUtils.createFeature(lyr, geom)
                 var dinfo = info.lookup[devKey] || info.lookup[parseInt(devKey)] || {}
                 var vals = {
@@ -2000,7 +2016,8 @@ Item {
                 if (LayerUtils.addFeature(lyr, feat)) written++
             }
 
-            if (!lyr.commitChanges()) throw "commit failed"
+            if (written === 0) throw "the layer did not accept the tracks"
+            if (!lyr.commitChanges()) throw "the layer could not save the tracks"
             lyr.triggerRepaint()
         } catch(e) {
             try { lyr.rollBack() } catch(e2) {}
@@ -2015,12 +2032,16 @@ Item {
         var fnames    = lyr.fields.names
         var nameField = _nameFieldFor(fnames, cfg.pointsNameField)
         var savedAt   = new Date().toISOString()
+        var dims      = _layerDims(lyr)
         var added     = 0
         positions.forEach(function(pos) {
             var info  = deviceInfo[pos.deviceId] || {}
             var attrs = pos.attributes || {}
             var xy    = _xyForLayer(lyr, pos.longitude, pos.latitude)
-            var geom  = GeometryUtils.createGeometryFromWkt("POINT(" + xy.x + " " + xy.y + ")")
+            var v     = xy.x + " " + xy.y
+            if (dims.z) v += " " + (pos.altitude || 0)
+            if (dims.m) v += " " + Math.round(new Date(pos.fixTime).getTime() / 1000)
+            var geom  = GeometryUtils.createGeometryFromWkt("Point" + dims.tag + " (" + v + ")")
             var feat  = FeatureUtils.createFeature(lyr, geom)
             var vals  = {
                 device_id:  pos.deviceId || -1,
@@ -2075,6 +2096,19 @@ Item {
             else if (vals[fnames[i]] !== undefined && vals[fnames[i]] !== null)
                 feat.setAttribute(i, vals[fnames[i]])
         }
+    }
+
+    // ── Z / M of a layer's geometry type ──────────────────────────────────
+    // Qgis.WkbType: +1000 = Z, +2000 = M, +3000 = ZM; 0x80000000 = old "25D" (Z)
+    function _layerDims(lyr) {
+        var t = 0
+        try { t = Number(lyr.wkbType()) } catch(e) { t = 0 }
+        var z = false, m = false
+        if (t >= 0x80000000) { z = true; t -= 0x80000000 }
+        if (t >= 3000 && t < 4000)      { z = true; m = true }
+        else if (t >= 2000 && t < 3000) m = true
+        else if (t >= 1000 && t < 2000) z = true
+        return { z: z, m: m, tag: (z ? "Z" : "") + (m ? "M" : "") }
     }
 
     // ── Reproject lon/lat to the layer CRS ────────────────────────────────

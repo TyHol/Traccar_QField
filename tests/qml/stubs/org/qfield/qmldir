@@ -1,0 +1,8 @@
+module org.qfield
+QfToolButton 1.0 QfToolButton.qml
+FeatureModel 1.0 FeatureModel.qml
+singleton LayerUtils 1.0 LayerUtils.qml
+singleton GeometryUtils 1.0 GeometryUtils.qml
+singleton FeatureUtils 1.0 FeatureUtils.qml
+singleton CoordinateReferenceSystemUtils 1.0 CoordinateReferenceSystemUtils.qml
+singleton ProjectUtils 1.0 ProjectUtils.qml
