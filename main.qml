@@ -1,11 +1,21 @@
 /**
- * Traccar Live – QField Plugin  v0.2
- * Patterns from Conversion_tools + GPX_Appender working plugins.
+ * Traccar Live – QField Plugin  v0.4
+ *
+ * One time window drives everything: the tracks drawn on the map are the fixes
+ * inside the window, and "Save tracks" / "Save positions" write exactly what is
+ * shown. Live keeps a "Last …" window moving forward.
+ *
+ * Main dialog — time window, Live, what to show, devices, save buttons.
+ * Settings    — a list of four short pages (Connection, Layers, Tag, Advanced);
+ *               every change applies immediately.
+ *
+ * All layer writes go through _queueWrite(), which waits while QFieldCloud is busy.
  */
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 import org.qfield
 import org.qgis
 import QtCore
@@ -14,7 +24,15 @@ import Theme
 Item {
     id: plugin
 
-    property var mainWindow: iface.mainWindow()
+    property var mainWindow:   iface.mainWindow()
+    property var mapCanvas:    iface.mapCanvas()
+    property var pointHandler: iface.findItemByObjectName("pointHandler")
+    property var wgs84:        CoordinateReferenceSystemUtils.fromDescription("EPSG:4326")
+
+    // Dialog geometry: full screen on phones, floating panel on wider screens
+    property bool phone:       mainWindow.width < 520
+    property real topInset:    mainWindow.sceneTopMargin    || 0
+    property real bottomInset: mainWindow.sceneBottomMargin || 0
 
     // ── Persistent settings ───────────────────────────────────────────────
     Settings {
@@ -23,80 +41,162 @@ Item {
         property string serverUrl:      "https://server.traccar.org"
         property string username:       ""
         property string password:       ""
-        property int    intervalMin:    3
-        property bool   liveOn:         false
-        property bool   appendTrack:     false   // append vertices to line layer
-        property bool   fetchHistory:    false   // pull all positions since last fetch
-        property string liveLayerName:   ""     // A — truncated & repopulated each fetch
-        property string appendLayerName: ""     // B — positions appended each fetch
-        property string lineLayerName:   ""     // C — track line layer
-        property string lastFetchIso:    ""     // internal — timestamp of last successful fetch
-        // kept for migration only — do not use directly
+
+        // Time window: minutes > 0 = "Last N minutes", -1 = custom dates, -2 = from feature
+        property int    windowMinutes:   60
+        property string customFrom:      ""     // "YYYY-MM-DD HH:MM" local
+        property string customTo:        ""
+        property int    eventFeatureFid: -1     // selected feature for "From feature"
+        property int    featureSpan:     0      // 0 = start→end, 1 = start + duration, 2 = end − duration
+        property int    featureDuration: 120    // minutes
+
+        // Live + overlay
+        property bool   liveOn:          false
+        property int    liveIntervalSec: 10
+        property int    staleMinutes:    10     // marker turns grey when last fix is older
+        property bool   showMarkers:     true
+        property bool   showLabels:      true
+        property bool   showAccuracy:    false
+        property bool   showTrails:      true   // "Tracks" toggle
+
+        // Layers (written only on Save)
+        property string pointsLayerName: ""
+        property string pointsNameField: ""     // extra text field to receive the device name
+        property int    pointsMode:      0      // 0 = latest fix per device, 1 = every fix in window
+        property string tracksLayerName: ""
+        property string tracksNameField: ""
+        property int    trackMode:       0      // 0 = add a new track per save, 1 = keep most recent only
+
+        // Session tag
+        property bool   incidentRefEnabled: false
+        property bool   useDisplayAsTag:    false  // "From feature" → use the feature's display value as tag
+        property string incidentRefField:   ""
+        property string sessionTag:         ""
+
+        // Event layer (time window "From feature")
+        property string eventLayerName:    ""
+        property string eventDisplayField: ""
+        property string eventStartField:   ""
+        property string eventEndField:     ""
+
+        // Kept for migration only — no longer used
+        property bool   v3Migrated:      false
+        property bool   v4Migrated:      false
+        property int    trailMinutes:    30
+        property int    pointsPerDevice: 1
+        property string liveLayerName:   ""
+        property string appendLayerName: ""
+        property string lineLayerName:   ""
         property string pointLayerName:  ""
-        property bool   appendMode:      false
-
-        property int    fetchMaxPoints:  150     // Fetch Logs: cap on points written per device
-        property bool   fetchLimitPts:   true     // Fetch Logs: whether the cap above is enforced
-
-        // ── Layer B housekeeping (culling) ────────────────────────────────
-        property bool   cullByCount:     false    // remove oldest points beyond cullMaxPerDevice (per device)
-        property int    cullMaxPerDevice: 500     // points retained per device in layer B when cullByCount is on
-        property bool   cullByAge:       false    // remove points older than cullAgeMinutes
-        property int    cullAgeMinutes:  1440     // age cutoff in minutes (default 1 day) when cullByAge is on
-
-        // ── Session tag ───────────────────────────────────────────────────
-        property bool   incidentRefEnabled: false  // write sessionTag into incidentRefField on new features
-        property bool   useDisplayAsTag:    false  // when fetching from a feature, use the display field value as the tag
-        property string incidentRefField:   ""     // target field name (same on layers A/B/C)
-        property string sessionTag:         ""     // plain text written verbatim into the field
-        // kept for migration — no longer used as expression
-        property string incidentRefExpr:    ""
-
-        // ── Fetch from Feature ────────────────────────────────────────────
-        property string eventLayerName:    ""   // layer to pick features from
-        property string eventDisplayField: ""   // field shown in the feature combo label
-        property string eventStartField:   ""   // datetime field: event start
-        property string eventEndField:     ""   // datetime field: event end (optional)
     }
 
-    // Shared timeframe presets — used by the Fetch Logs "Quick range" combo and
-    // the "Cull by age" combo (Settings). minutes:0 = "— Select date range —"
-    // (Fetch Logs only; treated as "no cutoff" if ever selected for cull-by-age).
+    // Time window choices. minutes -1 / -2 open inline controls in the main dialog.
     ListModel {
-        id: timeframeModel
-        ListElement { label: "— Select time period —"; minutes: 0    }
-        ListElement { label: "Last 15 minutes";        minutes: 15   }
-        ListElement { label: "Last 30 minutes";        minutes: 30   }
-        ListElement { label: "Last 1 hour";            minutes: 60   }
-        ListElement { label: "Last 2 hours";           minutes: 120  }
-        ListElement { label: "Last 3 hours";           minutes: 180  }
-        ListElement { label: "Last 6 hours";           minutes: 360  }
-        ListElement { label: "Last 12 hours";          minutes: 720  }
-        ListElement { label: "Last 18 hours";          minutes: 1080 }
-        ListElement { label: "Last 1 day";             minutes: 1440 }
-        ListElement { label: "Last 3 days";            minutes: 4320 }
-        ListElement { label: "Last 1 week";            minutes: 10080 }
-        ListElement { label: "Last 2 weeks";           minutes: 20160 }
-        ListElement { label: "Last 1 month";           minutes: 43200 }
-        ListElement { label: "Last 3 months";          minutes: 129600 }
+        id: windowModel
+        ListElement { label: "Last 15 minutes"; minutes: 15     }
+        ListElement { label: "Last 30 minutes"; minutes: 30     }
+        ListElement { label: "Last 1 hour";     minutes: 60     }
+        ListElement { label: "Last 2 hours";    minutes: 120    }
+        ListElement { label: "Last 3 hours";    minutes: 180    }
+        ListElement { label: "Last 6 hours";    minutes: 360    }
+        ListElement { label: "Last 12 hours";   minutes: 720    }
+        ListElement { label: "Last 1 day";      minutes: 1440   }
+        ListElement { label: "Last 3 days";     minutes: 4320   }
+        ListElement { label: "Last 1 week";     minutes: 10080  }
+        ListElement { label: "Last 2 weeks";    minutes: 20160  }
+        ListElement { label: "Last 1 month";    minutes: 43200  }
+        ListElement { label: "Last 3 months";   minutes: 129600 }
+        ListElement { label: "Custom dates…";   minutes: -1     }
+        ListElement { label: "From feature…";   minutes: -2     }
     }
 
     // ── Runtime state ─────────────────────────────────────────────────────
-    property var    deviceInfo:  ({})
-    property var    positions:   []
-    property string lastFetched: ""
-    property bool   fetchBusy:   false
-    property var    fetchLog:       []   // session history — see _addToFetchLog()
-    property string fetchTagOverride: "" // set to feature's display value when fetching from a feature
+    property var    deviceInfo:   ({})    // devId → {name, status}
+    property var    win:          null    // window currently loaded — see _computeWindow()
+    property var    tracks:       ({})    // devId → [positions in window], oldest first
+    property var    latest:       ({})    // devId → latest position (current fix)
+    property var    markerPos:    ({})    // devId → position drawn as the marker
+    property var    deviceRows:   []      // device list in the main dialog
+    property var    overlayModel: []      // markers
+    property var    trackModel:   []      // track lines (decimated for drawing)
+    property bool   loading:      false
+    property double loadStarted:  0
+    property string lastFetched:  ""
+    property string liveError:    ""
+    property string statusMsg:    ""      // window / loading hint under the time window
+    property string connState:    ""      // "" unknown, "ok", or an error message
+    property int    mapTick:      0       // bumped on pan / zoom / rotate → re-place overlay items
+    property int    crsTick:      0       // bumped when the map CRS changes → re-project
 
-    // ── Layer list models (for ComboBoxes in Settings) ─────────────────────
+    // Pending layer writes (held back while QFieldCloud is busy)
+    property var    writeQueue:     []
+    property double writeWaitStart: 0
+
+    // ── Models for pickers ────────────────────────────────────────────────
     ListModel { id: ptLayerModel }
     ListModel { id: lnLayerModel }
-    ListModel { id: fetchDevsModel }    // device list for Fetch Logs dialog
-    ListModel { id: fieldNameModel }    // field names of the append (B) layer
-    ListModel { id: allLayerModel }     // all vector layers (event layer picker in Settings)
-    ListModel { id: eventFieldModel }   // fields of the event layer (shared by 3 combos in Settings)
-    ListModel { id: eventFeatureModel } // features of the event layer (Fetch Logs picker)
+    ListModel { id: ptNameFieldModel }  // text fields of the points layer
+    ListModel { id: lnNameFieldModel }  // text fields of the tracks layer
+    ListModel { id: fieldNameModel }    // fields of both layers (tag field picker)
+    ListModel { id: allLayerModel }     // all vector layers (event layer picker)
+    ListModel { id: eventFieldModel }   // fields of the event layer
+    ListModel { id: eventFeatureModel } // features of the event layer
+
+    // ── Reusable picker: models with roles name + isHeader ────────────────
+    component PickCombo: ComboBox {
+        id: pick
+        Layout.fillWidth: true
+        textRole: "name"
+        delegate: ItemDelegate {
+            width: pick.width
+            enabled: !model.isHeader
+            highlighted: pick.highlightedIndex === index
+            contentItem: Text {
+                text: model.name
+                verticalAlignment: Text.AlignVCenter
+                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                font.pixelSize: model.isHeader ? 11 : 14
+                leftPadding: model.isHeader ? 4 : 8
+                elide: Text.ElideRight
+            }
+        }
+    }
+
+    // ── Small grey hint text ──────────────────────────────────────────────
+    component Hint: Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        font.pixelSize: 12
+        color: Theme.secondaryTextColor
+    }
+
+    // ── Row on the Settings list page ─────────────────────────────────────
+    component SettingsRow: ItemDelegate {
+        property string title
+        property string summary
+        property bool   warn: false
+        Layout.fillWidth: true
+        contentItem: RowLayout {
+            spacing: 8
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Label { text: title; font.bold: true; font.pixelSize: 15 }
+                Label {
+                    Layout.fillWidth: true
+                    text: summary
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 12
+                    color: warn ? "#B71C1C" : Theme.secondaryTextColor
+                }
+            }
+            Label { text: "›"; font.pixelSize: 24; color: Theme.secondaryTextColor }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  PICKER HELPERS
+    // ════════════════════════════════════════════════════════════════════════
 
     // ── Populate a layer model by geometry type ────────────────────────────
     function populateLayers(model, geomType) {
@@ -147,31 +247,82 @@ Item {
         combo.currentIndex = -1
     }
 
-    // ── Populate field-name model from a layer (by name) ──────────────────
-    function populateFieldNames(model, layerName) {
+    // Selected name from a picker; "" for the first ("none") entry or a header
+    function pickedName(combo, model) {
+        if (combo.currentIndex <= 0 || model.count === 0) return ""
+        var item = model.get(combo.currentIndex)
+        return (item && !item.isHeader) ? item.name : ""
+    }
+
+    // ── Text fields of a layer ────────────────────────────────────────────
+    // QML only sees field *names* on a layer (QgsFields exposes no types), so the
+    // types are read through QField's FeatureModel, whose Field role returns the
+    // QgsField (role = Qt.UserRole + 3 in QField 3.3 → 4.3), and LayerUtils.fieldType().
+    // Created at runtime so a QField version without it cannot stop the plugin
+    // loading. Returns {names, filtered}; filtered = false → types unknown, all fields.
+    function _textFieldNames(layerName) {
+        var layers = layerName !== "" ? qgisProject.mapLayersByName(layerName) : []
+        if (layers.length === 0) return { names: [], filtered: true }
+        var lyr   = layers[0]
+        var names = lyr.fields.names
+        var fm    = null
+        try {
+            fm = Qt.createQmlObject("import org.qfield\nFeatureModel {}", plugin, "fieldTypeProbe")
+            fm.currentLayer = lyr
+            var out = []
+            for (var i = 0; i < names.length; i++) {
+                var fld = fm.data(fm.index(i, 0), 0x0100 + 3)   // FeatureModel::Field
+                if (LayerUtils.fieldType(fld) === "QString") out.push(names[i])
+            }
+            fm.destroy()
+            return { names: out, filtered: true }
+        } catch(e) {
+            try { if (fm) fm.destroy() } catch(e2) {}
+        }
+        return { names: names, filtered: false }
+    }
+
+    // ── Device-name field picker model for one layer ──────────────────────
+    function populateNameFields(model, layerName) {
         model.clear()
-        if (layerName === "") {
-            model.append({ name: "— select a History layer (B) above —", isHeader: true })
+        model.append({ name: "— only a field called 'name' —", isHeader: false })
+        if (layerName === "") return
+        var r = _textFieldNames(layerName)
+        if (!r.filtered)
+            model.append({ name: "— field types unknown: all fields shown —", isHeader: true })
+        else if (r.names.length === 0)
+            model.append({ name: "— no text fields in this layer —", isHeader: true })
+        for (var i = 0; i < r.names.length; i++)
+            model.append({ name: r.names[i], isHeader: false })
+    }
+
+    // ── Field names of the points + tracks layers (tag field picker) ──────
+    function populateFieldNames(model, layerNames) {
+        model.clear()
+        model.append({ name: "— choose a field —", isHeader: false })
+        var seen  = {}
+        var names = []
+        layerNames.forEach(function(ln) {
+            if (ln === "") return
+            var layers = qgisProject.mapLayersByName(ln)
+            if (layers.length === 0) return
+            var fnames = layers[0].fields.names
+            for (var i = 0; i < fnames.length; i++) {
+                if (!seen[fnames[i]]) { seen[fnames[i]] = true; names.push(fnames[i]) }
+            }
+        })
+        if (names.length === 0) {
+            model.append({ name: "— pick points / tracks layers first —", isHeader: true })
             return
         }
-        var layers = qgisProject.mapLayersByName(layerName)
-        if (layers.length === 0) {
-            model.append({ name: "— layer not found —", isHeader: true })
-            return
-        }
-        var fnames = layers[0].fields.names
-        if (fnames.length === 0) {
-            model.append({ name: "— no fields —", isHeader: true })
-            return
-        }
-        for (var i = 0; i < fnames.length; i++)
-            model.append({ name: fnames[i], isHeader: false })
+        for (var j = 0; j < names.length; j++)
+            model.append({ name: names[j], isHeader: false })
     }
 
     // ── All vector layers (any geometry, including read-only) ─────────────
-    // Used for the event layer picker — we only read from it, not edit.
     function populateAllLayers(model) {
         model.clear()
+        model.append({ name: "— none —", isHeader: false })
         var layers = ProjectUtils.mapLayers(qgisProject)
         var names  = []
         for (var id in layers) {
@@ -183,17 +334,15 @@ Item {
             } catch(e) {}
         }
         names.sort(function(a, b) { return a.localeCompare(b) })
-        model.append({ name: "— none —", isHeader: false })
-        if (names.length === 0) return
         for (var i = 0; i < names.length; i++)
             model.append({ name: names[i], isHeader: false })
     }
 
-    // ── All fields of a named layer (no type filter — user picks) ─────────
+    // ── All fields of a named layer ───────────────────────────────────────
     function populateEventFields(model, layerName) {
         model.clear()
         model.append({ name: "— none —", isHeader: false })
-        if (layerName === "" || layerName === "— none —") return
+        if (layerName === "") return
         var layers = qgisProject.mapLayersByName(layerName)
         if (layers.length === 0) {
             model.append({ name: "— layer not found —", isHeader: true })
@@ -204,90 +353,106 @@ Item {
             model.append({ name: fnames[i], isHeader: false })
     }
 
-    // ── Feature list for the Fetch Logs "From feature" picker ─────────────
-    // Reads all features from cfg.eventLayerName, labels them using
-    // cfg.eventDisplayField + formatted start/end times, sorts newest-first.
+    // ── Features of the event layer for "From feature" ────────────────────
+    // Labels use the display field + local start/end, sorted newest first.
     function populateEventFeatures() {
         eventFeatureModel.clear()
         if (cfg.eventLayerName === "") {
-            eventFeatureModel.append({ label: "— configure Event Layer in Settings —",
-                                       startIso: "", endIso: "", fid: -1 })
+            eventFeatureModel.append({ label: "— set up in 🔧 Settings → Advanced —",
+                                       startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
         var layers = qgisProject.mapLayersByName(cfg.eventLayerName)
         if (layers.length === 0) {
             eventFeatureModel.append({ label: "— layer '" + cfg.eventLayerName + "' not found —",
-                                       startIso: "", endIso: "", fid: -1 })
+                                       startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
-        var lyr  = layers[0]
         var rows = []
         try {
-            var iter = LayerUtils.createFeatureIterator(lyr)
+            var iter = LayerUtils.createFeatureIterator(layers[0])
             while (iter.hasNext()) {
                 var f = iter.next()
                 var disp     = ""
-                var startRaw = ""
-                var endRaw   = ""
+                var startIso = ""   // normalised to UTC ISO so it sorts and parses reliably
+                var endIso   = ""
                 try { disp     = String(f.attribute(cfg.eventDisplayField) || "") } catch(e) {}
                 if (cfg.eventStartField !== "")
-                    try { startRaw = String(f.attribute(cfg.eventStartField) || "") } catch(e) {}
+                    try { startIso = _attrToIsoUtc(f.attribute(cfg.eventStartField)) } catch(e) {}
                 if (cfg.eventEndField !== "")
-                    try { endRaw   = String(f.attribute(cfg.eventEndField)   || "") } catch(e) {}
-
+                    try { endIso   = _attrToIsoUtc(f.attribute(cfg.eventEndField)) } catch(e) {}
                 var label = (disp !== "" ? disp : ("#" + f.id))
-                if (startRaw !== "") {
-                    var sd = new Date(startRaw)
-                    if (!isNaN(sd.getTime())) {
-                        label += "  (" + Qt.formatDateTime(sd, "dd MMM HH:mm")
-                        if (endRaw !== "") {
-                            var ed = new Date(endRaw)
-                            label += !isNaN(ed.getTime())
-                                     ? " – " + Qt.formatDateTime(ed, "dd MMM HH:mm")
-                                     : " – ongoing"
-                        } else {
-                            label += " – ongoing"
-                        }
-                        label += ")"
-                    }
-                }
-                rows.push({ label: label, startIso: startRaw, endIso: endRaw, fid: f.id, disp: disp })
+                if (startIso !== "")
+                    label += "  (" + _fmtLocal(startIso)
+                           + (endIso !== "" ? " – " + _fmtLocal(endIso) : " – ongoing") + ")"
+                rows.push({ label: label, startIso: startIso, endIso: endIso, fid: f.id, disp: disp })
             }
             iter.close()
         } catch(e) {
             eventFeatureModel.append({ label: "— error reading features: " + e + " —",
-                                       startIso: "", endIso: "", fid: -1 })
+                                       startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
-        // Newest first: start field descending, then feature id descending
         rows.sort(function(a, b) {
-            if (a.startIso !== "" && b.startIso !== "")
-                return b.startIso.localeCompare(a.startIso)
+            if (a.startIso !== "" && b.startIso !== "") return b.startIso.localeCompare(a.startIso)
             if (a.startIso !== "") return -1
             if (b.startIso !== "") return  1
             return b.fid - a.fid
         })
         if (rows.length === 0) {
             eventFeatureModel.append({ label: "— no features in layer —",
-                                       startIso: "", endIso: "", fid: -1 })
+                                       startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
-        for (var i = 0; i < rows.length; i++)
-            eventFeatureModel.append(rows[i])
+        for (var i = 0; i < rows.length; i++) eventFeatureModel.append(rows[i])
     }
 
-    // ── Register toolbar button ───────────────────────────────────────────
+    function _selectedEventFeature() {
+        for (var i = 0; i < eventFeatureModel.count; i++) {
+            var f = eventFeatureModel.get(i)
+            if (f.fid >= 0 && f.fid === cfg.eventFeatureFid) return f
+        }
+        return null
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  STARTUP
+    // ════════════════════════════════════════════════════════════════════════
     Component.onCompleted: {
         iface.addItemToPluginsToolbar(pluginButton)
-        // Migrate old pointLayerName/appendMode → liveLayerName/appendLayerName
-        if (cfg.pointLayerName !== "" &&
-                cfg.liveLayerName === "" && cfg.appendLayerName === "") {
-            if (cfg.appendMode)
-                cfg.appendLayerName = cfg.pointLayerName
-            else
-                cfg.liveLayerName = cfg.pointLayerName
-            cfg.pointLayerName = ""
+
+        // Migrate v0.2 layers A/B/C → points / tracks layers (once)
+        if (!cfg.v3Migrated) {
+            if (cfg.pointsLayerName === "")
+                cfg.pointsLayerName = cfg.appendLayerName !== "" ? cfg.appendLayerName
+                                    : cfg.liveLayerName   !== "" ? cfg.liveLayerName
+                                    : cfg.pointLayerName
+            if (cfg.tracksLayerName === "")
+                cfg.tracksLayerName = cfg.lineLayerName
+            cfg.v3Migrated = true
         }
+        // Migrate v0.3 trail length / points-per-device (once)
+        if (!cfg.v4Migrated) {
+            if (cfg.trailMinutes > 0) cfg.windowMinutes = cfg.trailMinutes
+            cfg.pointsMode = cfg.pointsPerDevice > 1 ? 1 : 0
+            cfg.v4Migrated = true
+        }
+
+        // Tap a marker → device info toast
+        try {
+            if (pointHandler) {
+                pointHandler.registerHandler("traccarlive", function(point, type, interactionType) {
+                    if (interactionType !== "clicked") return false
+                    return _onMapTap(point)
+                })
+            }
+        } catch(e) { /* older QField without pointHandler.registerHandler */ }
+
+        if (cfg.liveOn) Qt.callLater(loadWindow)
+    }
+
+    Component.onDestruction: {
+        try { if (pointHandler) pointHandler.deregisterHandler("traccarlive") } catch(e) {}
     }
 
     QfToolButton {
@@ -298,13 +463,184 @@ Item {
         onClicked:  mainDialog.open()
     }
 
-    // ── Auto-refresh timer ────────────────────────────────────────────────
+    // ── Live refresh: only while the window is still moving ───────────────
     Timer {
-        id:          refreshTimer
-        interval:    cfg.intervalMin * 60000
+        id:          liveTimer
+        interval:    Math.max(2, cfg.liveIntervalSec) * 1000
         repeat:      true
-        running:     cfg.liveOn
-        onTriggered: fetchAll()
+        running:     cfg.liveOn && plugin.win !== null && plugin.win.moving
+        onTriggered: pollLive()
+    }
+
+    // ── Re-place overlay items when the map moves ─────────────────────────
+    Connections {
+        target: plugin.mapCanvas ? plugin.mapCanvas.mapSettings : null
+        function onExtentChanged()         { plugin.mapTick++ }
+        function onRotationChanged()       { plugin.mapTick++ }
+        function onOutputSizeChanged()     { plugin.mapTick++ }
+        function onDestinationCrsChanged() { plugin.crsTick++; plugin.mapTick++ }
+    }
+
+    // ── Retry pending layer writes once QFieldCloud is idle ───────────────
+    Timer {
+        id:          cloudWaitTimer
+        interval:    3000
+        repeat:      true
+        onTriggered: _drainWrites()
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  MAP OVERLAY  (drawn on the map canvas — nothing written to file)
+    // ════════════════════════════════════════════════════════════════════════
+
+    Item {
+        id:      overlayLayer
+        parent:  plugin.mapCanvas
+        anchors.fill: parent
+
+        // ── Tracks: the fixes inside the time window ──────────────────────
+        Repeater {
+            model: cfg.showTrails ? plugin.trackModel : []
+            delegate: Shape {
+                id: trackShape
+                anchors.fill: parent
+                property var proj: { plugin.crsTick; return plugin._projectCoords(modelData.coords) }
+                property var pts:  { plugin.mapTick; return plugin._toScreen(proj) }
+                visible: pts.length > 1
+                ShapePath {
+                    strokeColor: modelData.fresh ? "#AA1565C0" : "#AA9E9E9E"
+                    strokeWidth: 3
+                    fillColor:   "transparent"
+                    capStyle:    ShapePath.RoundCap
+                    joinStyle:   ShapePath.RoundJoin
+                    PathPolyline { path: trackShape.pts }
+                }
+            }
+        }
+
+        // ── Device markers ────────────────────────────────────────────────
+        Repeater {
+            model: cfg.showMarkers ? plugin.overlayModel : []
+            delegate: Item {
+                id: marker
+                property var   d:  modelData
+                property var   mp: { plugin.crsTick; return plugin._toMapPoint(d.lon, d.lat) }
+                property point sp: { plugin.mapTick; return plugin.mapCanvas.mapSettings.coordinateToScreen(mp) }
+                property color c:  d.fresh ? "#1565C0" : "#9E9E9E"
+                x: sp.x
+                y: sp.y
+                width: 0; height: 0
+
+                // Accuracy circle (only meaningful when map units are metres)
+                Rectangle {
+                    visible: cfg.showAccuracy && marker.d.acc > 0 && !plugin._mapIsGeographic()
+                    width: {
+                        plugin.mapTick
+                        var mupp = plugin.mapCanvas.mapSettings.mapUnitsPerPoint
+                        return mupp > 0 ? Math.min(4000, 2 * marker.d.acc / mupp) : 0
+                    }
+                    height: width
+                    radius: width / 2
+                    anchors.centerIn: parent
+                    color:        Qt.rgba(marker.c.r, marker.c.g, marker.c.b, 0.15)
+                    border.color: Qt.rgba(marker.c.r, marker.c.g, marker.c.b, 0.5)
+                    border.width: 1
+                }
+
+                Rectangle {
+                    width: 20; height: 20; radius: 10
+                    anchors.centerIn: parent
+                    color:        "white"
+                    border.color: marker.c
+                    border.width: 3
+                    Rectangle {
+                        width: 8; height: 8; radius: 4
+                        anchors.centerIn: parent
+                        color: marker.c
+                    }
+                }
+
+                Rectangle {
+                    visible: cfg.showLabels
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y:      -32
+                    width:  markerLabel.contentWidth + 6
+                    height: markerLabel.contentHeight + 2
+                    radius: 3
+                    color:  "#E6FFFFFF"
+                    Label {
+                        id: markerLabel
+                        anchors.centerIn: parent
+                        text:           marker.d.name
+                        font.pixelSize: 11
+                        font.bold:      true
+                        color:          marker.c
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Overlay helpers ───────────────────────────────────────────────────
+    function _toMapPoint(lon, lat) {
+        return GeometryUtils.reprojectPoint(GeometryUtils.point(lon, lat), plugin.wgs84,
+                                            plugin.mapCanvas.mapSettings.destinationCrs)
+    }
+
+    function _projectCoords(coords) {
+        var out = []
+        try {
+            for (var i = 0; i < coords.length; i++)
+                out.push(_toMapPoint(coords[i].lon, coords[i].lat))
+        } catch(e) {}
+        return out
+    }
+
+    function _toScreen(mapPoints) {
+        var ms  = plugin.mapCanvas.mapSettings
+        var out = []
+        for (var i = 0; i < mapPoints.length; i++) {
+            var s = ms.coordinateToScreen(mapPoints[i])
+            out.push(Qt.point(s.x, s.y))
+        }
+        return out
+    }
+
+    function _mapIsGeographic() {
+        plugin.crsTick
+        try { return plugin.mapCanvas.mapSettings.destinationCrs.isGeographic === true } catch(e) {}
+        return false
+    }
+
+    function _isFresh(fixTime) {
+        if (!fixTime) return false
+        return (Date.now() - new Date(fixTime).getTime()) < cfg.staleMinutes * 60000
+    }
+
+    // Keep at most maxPts vertices for drawing (always keeps first and last)
+    function _decimate(coords, maxPts) {
+        if (coords.length <= maxPts) return coords
+        var out  = []
+        var step = (coords.length - 1) / (maxPts - 1)
+        for (var i = 0; i < maxPts; i++) out.push(coords[Math.round(i * step)])
+        return out
+    }
+
+    function _onMapTap(point) {
+        if (!cfg.showMarkers) return false
+        var ms = plugin.mapCanvas.mapSettings
+        for (var i = 0; i < plugin.overlayModel.length; i++) {
+            var d = plugin.overlayModel[i]
+            var s = ms.coordinateToScreen(_toMapPoint(d.lon, d.lat))
+            if (Math.abs(point.x - s.x) < 24 && Math.abs(point.y - s.y) < 24) {
+                var msg = d.name + "\nFix " + _ageText(d.fixTime) + " ago"
+                msg += "  •  " + Math.round((d.speed || 0) * 1.852) + " km/h"
+                if (d.battery !== null && d.battery !== undefined) msg += "  •  🔋" + d.battery + "%"
+                mainWindow.displayToast(msg)
+                return true
+            }
+        }
+        return false
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -315,9 +651,12 @@ Item {
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
-        width:   Math.min(mainWindow.width * 0.92, 420)
-        x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.08
+        padding: 8
+        width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
+        height:  plugin.phone ? mainWindow.height - plugin.topInset - plugin.bottomInset
+                              : Math.min(mainWindow.height * 0.9, 780)
+        x:       (mainWindow.width - width) / 2
+        y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
 
         header: ToolBar {
             background: Rectangle { color: "#1565C0" }
@@ -326,154 +665,340 @@ Item {
                 Label {
                     text:             "Traccar Live"
                     color:            "white"
-                    font.pixelSize:   16
+                    font.pixelSize:   17
                     font.bold:        true
                     Layout.fillWidth: true
                 }
                 ToolButton {
                     contentItem: Text {
-                        text: "?"
-                        color: "white"
-                        font.pixelSize: 16
-                        font.bold: true
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:   Text.AlignVCenter
+                        text: "?"; color: "white"; font.pixelSize: 18; font.bold: true
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     }
                     background: Item {}
-                    onClicked:  { mainDialog.close(); helpDialog.open() }
+                    onClicked: { mainDialog.close(); helpDialog.open() }
                 }
                 ToolButton {
                     contentItem: Text {
-                        text: "🔧"
-                        color: "white"
-                        font.pixelSize: 18
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:   Text.AlignVCenter
+                        text: "🔧"; color: "white"; font.pixelSize: 18
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     }
                     background: Item {}
-                    onClicked:  { mainDialog.close(); settingsDialog.open() }
+                    onClicked: openSettings("")
+                }
+                ToolButton {
+                    contentItem: Text {
+                        text: "✕"; color: "white"; font.pixelSize: 18
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Item {}
+                    onClicked: mainDialog.close()
                 }
             }
         }
 
-        footer: Item { height: 4 }
+        onOpened: {
+            windowCombo.currentIndex = _windowIndex(cfg.windowMinutes)
+            fromDateField.text = cfg.customFrom !== "" ? cfg.customFrom : Qt.formatDate(new Date(), "yyyy-MM-dd") + " 00:00"
+            toDateField.text   = cfg.customTo   !== "" ? cfg.customTo   : Qt.formatDate(new Date(), "yyyy-MM-dd") + " 23:59"
+            featureSpanCombo.currentIndex = cfg.featureSpan
+            durationSpin.value = cfg.featureDuration
+            if (cfg.windowMinutes === -2) _refreshFeatureCombo()
+        }
 
         ColumnLayout {
-            width:   parent.width
-            spacing: 0
+            anchors.fill: parent
+            spacing: 6
 
-            // Last-fetched banner
+            // ── First-run checklist ───────────────────────────────────────
             Rectangle {
                 Layout.fillWidth: true
-                height:  visible ? 30 : 0
-                visible: plugin.lastFetched !== ""
-                color:   "#E3F2FD"
-                Label {
-                    anchors { fill: parent; leftMargin: 10 }
-                    text:              "Last fetched:  " + plugin.lastFetched
-                    verticalAlignment: Text.AlignVCenter
-                    font.pixelSize:    12
-                    color:             "#1565C0"
+                visible: !plugin.isConnected()
+                color:   "#FFF8E1"
+                radius:  4
+                implicitHeight: setupCol.implicitHeight + 16
+                ColumnLayout {
+                    id: setupCol
+                    anchors { fill: parent; margins: 8 }
+                    spacing: 4
+                    Label { text: "Getting started"; font.bold: true }
+                    Hint { text: "1. Connect to your Traccar server.\n2. Choose where saved points and tracks go (optional)." }
+                    Button { text: "Set up connection"; onClicked: openSettings("connection") }
                 }
             }
 
-            // Controls
+            // ── Error banner (tap → Connection settings) ──────────────────
+            Rectangle {
+                Layout.fillWidth: true
+                visible: plugin.liveError !== ""
+                color:   "#FFEBEE"
+                radius:  4
+                implicitHeight: errLabel.implicitHeight + 12
+                Label {
+                    id: errLabel
+                    anchors { fill: parent; margins: 6 }
+                    text: "⚠  " + plugin.liveError + "  — tap to check settings"
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 12
+                    color: "#B71C1C"
+                }
+                MouseArea { anchors.fill: parent; onClicked: openSettings("connection") }
+            }
+
+            // ── Time window ───────────────────────────────────────────────
+            Label { text: "Time window"; font.bold: true }
+            ComboBox {
+                id: windowCombo
+                Layout.fillWidth: true
+                model:    windowModel
+                textRole: "label"
+                onActivated: {
+                    var m = windowModel.get(currentIndex).minutes
+                    cfg.windowMinutes = m
+                    if (m === -2) _refreshFeatureCombo()
+                    if (m > 0) reloadWindow()        // custom / feature wait for "Show"
+                    else       plugin.statusMsg = "Set the window below, then tap Show"
+                }
+            }
+
+            // Custom dates
+            GridLayout {
+                visible: cfg.windowMinutes === -1
+                Layout.fillWidth: true
+                columns: 2
+                Label { text: "From" }
+                TextField {
+                    id: fromDateField
+                    Layout.fillWidth: true
+                    placeholderText:  "YYYY-MM-DD HH:MM"
+                    inputMethodHints: Qt.ImhNoPredictiveText
+                }
+                Label { text: "To" }
+                TextField {
+                    id: toDateField
+                    Layout.fillWidth: true
+                    placeholderText:  "YYYY-MM-DD HH:MM"
+                    inputMethodHints: Qt.ImhNoPredictiveText
+                }
+            }
+
+            // From feature
+            ColumnLayout {
+                visible: cfg.windowMinutes === -2
+                Layout.fillWidth: true
+                spacing: 4
+                RowLayout {
+                    Layout.fillWidth: true
+                    ComboBox {
+                        id: eventFeatureCombo
+                        Layout.fillWidth: true
+                        model:    eventFeatureModel
+                        textRole: "label"
+                        onActivated: cfg.eventFeatureFid = eventFeatureModel.get(currentIndex).fid
+                    }
+                    ToolButton {
+                        text: "🔄"
+                        onClicked: _refreshFeatureCombo()
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    ComboBox {
+                        id: featureSpanCombo
+                        Layout.fillWidth: true
+                        model: ["Its start → its end", "Its start + duration", "Its end − duration"]
+                        onActivated: cfg.featureSpan = currentIndex
+                    }
+                    SpinBox {
+                        id: durationSpin
+                        visible: featureSpanCombo.currentIndex > 0
+                        from: 1; to: 14400; stepSize: 15; editable: true
+                        onValueModified: cfg.featureDuration = value
+                    }
+                    Label { visible: durationSpin.visible; text: "min" }
+                }
+            }
+
+            Button {
+                visible: cfg.windowMinutes < 0
+                Layout.fillWidth: true
+                text: "Show this window"
+                onClicked: {
+                    if (cfg.windowMinutes === -1) {
+                        cfg.customFrom = fromDateField.text.trim()
+                        cfg.customTo   = toDateField.text.trim()
+                    }
+                    reloadWindow()
+                }
+            }
+
+            Hint { text: plugin.windowSummary(); visible: text !== "" }
+
+            // ── Live / refresh / clear ────────────────────────────────────
             RowLayout {
                 Layout.fillWidth: true
-                Layout.margins:   10
-                spacing:          8
+                spacing: 6
                 Button {
                     Layout.fillWidth: true
-                    text:    cfg.liveOn ? "⏹  Stop" : "▶  Start"
+                    text: cfg.liveOn ? "⏹  Stop live" : "▶  Live"
                     onClicked: {
                         cfg.liveOn = !cfg.liveOn
-                        if (cfg.liveOn) fetchAll()
-                        mainWindow.displayToast(cfg.liveOn ? "Live tracking started" : "Live tracking stopped")
+                        if (cfg.liveOn) loadWindow()
                     }
                 }
                 Button {
-                    text:    "↻ Now"
-                    enabled: !plugin.fetchBusy
-                    onClicked: fetchAll()
+                    text: plugin.loading ? "…" : "🔄"
+                    enabled: !plugin.loading
+                    onClicked: loadWindow()
                 }
                 Button {
-                    text:    "Fetch"
-                    onClicked: { mainDialog.close(); fetchLogsDialog.open() }
+                    text: "Clear"
+                    enabled: plugin.win !== null
+                    onClicked: { cfg.liveOn = false; clearWindow(); plugin.statusMsg = "" }
                 }
             }
 
-            Label {
-                text:                "Devices  (" + plugin.positions.length + ")"
-                font.bold:           true
-                Layout.leftMargin:   12
-                Layout.topMargin:    4
-                Layout.bottomMargin: 2
+            // ── What to show ──────────────────────────────────────────────
+            Flow {
+                Layout.fillWidth: true
+                spacing: 0
+                CheckBox { text: "Markers";  checked: cfg.showMarkers;  onToggled: cfg.showMarkers  = checked }
+                CheckBox { text: "Labels";   checked: cfg.showLabels;   onToggled: cfg.showLabels   = checked }
+                CheckBox { text: "Tracks";   checked: cfg.showTrails;   onToggled: cfg.showTrails   = checked }
+                CheckBox { text: "Accuracy"; checked: cfg.showAccuracy; onToggled: cfg.showAccuracy = checked }
             }
 
-            // Device list
-            ListView {
+            // ── Devices ───────────────────────────────────────────────────
+            RowLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(plugin.positions.length * 58, 290)
+                Label { text: "Devices  (" + plugin.deviceRows.length + ")"; font.bold: true; Layout.fillWidth: true }
+                Label {
+                    visible: plugin.lastFetched !== ""
+                    text: "updated " + plugin.lastFetched
+                    font.pixelSize: 11
+                    color: Theme.secondaryTextColor
+                }
+            }
+            ListView {
+                Layout.fillWidth:  true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 60
                 clip:  true
-                model: plugin.positions
+                model: plugin.deviceRows
 
                 delegate: Rectangle {
                     width:  ListView.view.width
-                    height: 58
+                    height: 54
                     color:  index % 2 === 0 ? "#F5F5F5" : "white"
-
-                    property var pos:    modelData
-                    property var info:   plugin.deviceInfo[pos.deviceId] || {}
-                    property bool online: (info.status || "") === "online"
+                    property var row: modelData
 
                     RowLayout {
-                        anchors { fill: parent; leftMargin: 12; rightMargin: 8 }
-                        spacing: 10
+                        anchors { fill: parent; leftMargin: 10; rightMargin: 4 }
+                        spacing: 8
                         Rectangle {
                             width: 10; height: 10; radius: 5
-                            color: online ? "#4CAF50" : "#9E9E9E"
+                            color: row.fresh ? "#4CAF50" : "#9E9E9E"
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            spacing: 1
                             Label {
-                                text:             info.name || ("Device " + pos.deviceId)
-                                font.bold:        true
-                                font.pixelSize:   13
-                                elide:            Text.ElideRight
+                                text: row.name
+                                font.bold: true
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }
                             Label {
-                                text: {
-                                    var spd  = Math.round((pos.speed || 0) * 1.852)
-                                    // fixTime = GPS fix time on the device (≠ fetch time)
-                                    var date = pos.fixTime ? pos.fixTime.substring(0,10) : ""
-                                    var time = pos.fixTime ? pos.fixTime.substring(11,19) : "—"
-                                    var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
-                                    var timeStr = (date && date !== today) ? date + " " + time : time
-                                    var bat  = (pos.attributes && pos.attributes.batteryLevel != null)
-                                               ? "  🔋" + pos.attributes.batteryLevel + "%" : ""
-                                    return spd + " km/h  •  GPS " + timeStr + bat
-                                }
+                                text: row.line
                                 font.pixelSize: 11
                                 color: "#555"
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
                             }
                         }
                         ToolButton {
+                            visible: row.pos !== null
                             contentItem: Text {
-                                text: "⌖"; font.pixelSize: 18
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment:   Text.AlignVCenter
+                                text: "⌖"; font.pixelSize: 20
+                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                             }
                             background: Item {}
-                            onClicked: { zoomToDevice(pos); mainDialog.close() }
+                            onClicked: { zoomToDevice(row.pos); mainDialog.close() }
                         }
                     }
                 }
             }
 
-            Item { height: 6 }
+            // ── Save ──────────────────────────────────────────────────────
+            Label {
+                visible:          plugin.writeQueue.length > 0
+                text:             "⏳ Waiting for QFieldCloud sync to finish before saving…"
+                font.pixelSize:   12
+                color:            "#E65100"
+                wrapMode:         Text.WordWrap
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Button {
+                    Layout.fillWidth: true
+                    text: "📍 Save positions"
+                    onClicked: savePositions()
+                }
+                Button {
+                    Layout.fillWidth: true
+                    text: "〰 Save tracks"
+                    onClicked: saveTracks()
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                text: plugin.savesToText()
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
+                color: (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
+                       ? "#B71C1C" : Theme.secondaryTextColor
+                MouseArea { anchors.fill: parent; onClicked: openSettings("layers") }
+            }
         }
+    }
+
+    function _windowIndex(minutes) {
+        for (var i = 0; i < windowModel.count; i++)
+            if (windowModel.get(i).minutes === minutes) return i
+        return 2   // Last 1 hour
+    }
+
+    function _refreshFeatureCombo() {
+        populateEventFeatures()
+        eventFeatureCombo.currentIndex = 0
+        for (var i = 0; i < eventFeatureModel.count; i++) {
+            if (eventFeatureModel.get(i).fid === cfg.eventFeatureFid) {
+                eventFeatureCombo.currentIndex = i
+                break
+            }
+        }
+        var f = eventFeatureModel.get(eventFeatureCombo.currentIndex)
+        if (f) cfg.eventFeatureFid = f.fid
+    }
+
+    function isConnected() {
+        return cfg.username !== "" && cfg.serverUrl !== ""
+               && plugin.connState !== "wrong username or password"
+    }
+
+    function savesToText() {
+        if (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
+            return "⚠ No layers chosen to save to — tap here"
+        var parts = []
+        if (cfg.pointsLayerName !== "")
+            parts.push("Positions → " + cfg.pointsLayerName
+                       + (cfg.pointsMode === 1 ? " (every fix)" : " (latest fix)"))
+        if (cfg.tracksLayerName !== "")
+            parts.push("Tracks → " + cfg.tracksLayerName
+                       + (cfg.trackMode === 1 ? " (keep most recent)" : " (add new)"))
+        return parts.join("   ·   ") + "   ›"
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -484,1286 +1009,615 @@ Item {
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
-        title:   "Traccar Live — Help"
-        width:   Math.min(mainWindow.width * 0.92, 420)
-        x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.06
+        padding: 10
+        width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
+        height:  plugin.phone ? mainWindow.height - plugin.topInset - plugin.bottomInset
+                              : Math.min(mainWindow.height * 0.9, 780)
+        x:       (mainWindow.width - width) / 2
+        y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
 
-        standardButtons: Dialog.Ok
-        onAccepted: mainDialog.open()
+        header: ToolBar {
+            background: Rectangle { color: "#1565C0" }
+            RowLayout {
+                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                ToolButton {
+                    contentItem: Text {
+                        text: "←"; color: "white"; font.pixelSize: 20
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Item {}
+                    onClicked: helpDialog.close()
+                }
+                Label {
+                    text: "Help"
+                    color: "white"; font.pixelSize: 17; font.bold: true
+                    Layout.fillWidth: true
+                }
+            }
+        }
+        onClosed: mainDialog.open()
 
         ScrollView {
-            width:       parent.width
-            height:      Math.min(implicitHeight, mainWindow.height * 0.72)
-            contentWidth: parent.width
+            id: helpScroll
+            anchors.fill: parent
+            contentWidth: availableWidth
+            clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width:   parent.width
-                spacing: 8
+                width:   helpScroll.availableWidth
+                spacing: 6
 
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
-                    text: "Buttons"
-                }
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    text: "▶ Start / ⏹ Stop — live tracking (auto-fetch every N min)\n" +
-                          "↻ Now — single fetch immediately\n" +
-                          "Fetch — open Fetch Logs to pull historical positions\n" +
-                          "🔧 — Settings\n" +
-                          "⌖ (device row) — pan map to that device"
+                Label { text: "Getting started"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "1. 🔧 Settings → Connection: enter your Traccar server and account, tap Test.\n" +
+                          "2. Choose a time window and tap ▶ Live (or 🔄 to load it once).\n" +
+                          "3. To keep what you see, pick layers in 🔧 Settings → Layers and use the Save buttons."
                 }
 
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
-                    text: "Layers  (configure in 🔧 Settings → Layers)"
-                }
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    text: "A — Live points: replaced each fetch, one point per device\n" +
-                          "B — Accumulated points: positions appended, never deleted\n" +
-                          "C — Tracks: one line per device, grows with each fetch\n\n" +
-                          "Any layer can be left unset — it will simply be skipped. " +
-                          "Fields not in your layer are silently ignored."
-                }
-
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
-                    text: "Fetch Logs"
-                }
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    text: "Time period — preset window (last 15 min → last 3 months)\n" +
-                          "Custom dates — enter YYYY-MM-DD or YYYY-MM-DD HH:MM\n" +
-                          "From feature — time window taken from a layer feature's date fields\n\n" +
-                          "All devices are fetched. Writes to whichever of B / C are set in Settings."
+                Label { text: "Time window"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "One window controls everything: the tracks on the map are the fixes inside it, " +
+                          "and the Save buttons save exactly that.\n" +
+                          "• Last 15 min … Last 3 months — follows the current time.\n" +
+                          "• Custom dates — enter From / To in local time, tap Show this window.\n" +
+                          "• From feature — use the start/end times of a feature (e.g. an incident). " +
+                          "Set the layer up once in 🔧 Settings → Advanced.\n" +
+                          "Each device row shows how many fixes it has in the window and their time span."
                 }
 
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap; font.bold: true
-                    text: "Session Tag  (Settings → Session Tag)"
-                }
-                Label {
-                    Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    text: "Stamps a text value onto every feature written to B and C. " +
-                          "When fetching From feature, the feature's display field value " +
-                          "is used automatically if 'Use display field as tag' is enabled."
+                Label { text: "Live, 🔄 and Clear"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "▶ Live refreshes every few seconds and keeps a 'Last …' window moving. " +
+                          "A window that ends in the past cannot change, so Live pauses for it and markers " +
+                          "show each device's last fix in that window.\n" +
+                          "🔄 loads the window once.  Clear removes everything from the map.\n" +
+                          "Nothing is written to your project until you tap a Save button."
                 }
 
-                Item { height: 4 }
+                Label { text: "On the map"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "Markers are blue when the last fix is recent and grey when it is older than the " +
+                          "limit in Settings → Advanced. Tap a marker for name, fix age, speed and battery. " +
+                          "Markers, Labels, Tracks and Accuracy circles can each be switched on or off. " +
+                          "⌖ in the device list centres the map on that device."
+                }
+
+                Label { text: "Saving"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "📍 Save positions — adds a point per device: its latest fix, or every fix in the " +
+                          "window (Settings → Layers).\n" +
+                          "〰 Save tracks — adds one line per device for the window, or replaces that " +
+                          "device's previous track if 'Keep most recent' is chosen.\n" +
+                          "Fields are filled by name (device_id, name, fix_time, speed_kmh, battery, " +
+                          "start_time, last_update, …); fields your layer doesn't have are skipped. " +
+                          "You can also send the device name to any text field, e.g. 'title'.\n" +
+                          "If QFieldCloud is syncing, the save waits and runs when it finishes."
+                }
+
+                Label { text: "Times"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "Everything here is shown in your phone's local time, including summer time. " +
+                          "Saved date/time fields are stored in UTC (QField forms show them as local time; " +
+                          "QGIS desktop shows UTC). Optional text fields fix_local / start_local / last_local " +
+                          "hold the local time as text."
+                }
+
+                Label { text: "Session tag"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "🔧 Settings → Tag stamps a text such as FIRE-2026-001 onto everything you save. " +
+                          "With 'From feature', the feature's display value can be used as the tag instead."
+                }
+                Item { height: 8 }
             }
         }
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  SETTINGS DIALOG
+    //  SETTINGS DIALOG  — list of pages; every change applies immediately
     // ════════════════════════════════════════════════════════════════════════
+
+    function openSettings(page) {
+        mainDialog.close()
+        settingsDialog.page = page
+        settingsDialog.open()
+    }
+
     Dialog {
         id:      settingsDialog
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
-        width:   Math.min(mainWindow.width * 0.92, 420)
-        x:       (mainWindow.width  - width)  / 2
-        y:       mainWindow.height * 0.02     // near top so Save is reachable
+        padding: 10
+        width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
+        height:  plugin.phone ? mainWindow.height - plugin.topInset - plugin.bottomInset
+                              : Math.min(mainWindow.height * 0.9, 780)
+        x:       (mainWindow.width - width) / 2
+        y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
+
+        property string page: ""   // "" = list, "connection", "layers", "tag", "advanced"
+
+        readonly property var titles: ({ "": "Settings", "connection": "Connection",
+                                         "layers": "Layers", "tag": "Tag", "advanced": "Advanced" })
 
         header: ToolBar {
             background: Rectangle { color: "#1565C0" }
             RowLayout {
-                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
+                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                ToolButton {
+                    contentItem: Text {
+                        text: "←"; color: "white"; font.pixelSize: 20
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Item {}
+                    onClicked: {
+                        settingsDialog.commitText()
+                        if (settingsDialog.page !== "") settingsDialog.page = ""
+                        else                            settingsDialog.close()
+                    }
+                }
                 Label {
-                    text:             "🔧  Settings"
-                    color:            "white"
-                    font.pixelSize:   16
-                    font.bold:        true
+                    text: settingsDialog.titles[settingsDialog.page]
+                    color: "white"; font.pixelSize: 17; font.bold: true
                     Layout.fillWidth: true
                 }
                 ToolButton {
                     contentItem: Text {
-                        text: "Fetch"
-                        color: "white"
-                        font.pixelSize: 13
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:   Text.AlignVCenter
+                        text: "✕"; color: "white"; font.pixelSize: 18
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     }
                     background: Item {}
-                    onClicked: { settingsDialog.close(); fetchLogsDialog.open() }
+                    onClicked: settingsDialog.close()
                 }
             }
         }
 
-        property bool advancedOpen:    false
-        property bool localUseDisplay: false   // shared between Feature page and Session Tag page
-
-        // No standardButtons — Save/Cancel live inside the ScrollView
-        footer: Item { height: 0 }
-
-        // Populate controls from current config when dialog opens
-        onOpened: {
-            urlField.text      = cfg.serverUrl
-            userField.text     = cfg.username
-            passField.text     = cfg.password
-            intervalSpin.value = cfg.intervalMin
-            populateLayers(ptLayerModel, Qgis.GeometryType.Point)
-            restoreSelection(liveLayerCombo,   ptLayerModel, cfg.liveLayerName)
-            if (liveLayerCombo.currentIndex   < 0) liveLayerCombo.currentIndex   = 0
-            restoreSelection(appendLayerCombo, ptLayerModel, cfg.appendLayerName)
-            if (appendLayerCombo.currentIndex < 0) appendLayerCombo.currentIndex = 0
-            populateLayers(lnLayerModel, Qgis.GeometryType.Line)
-            restoreSelection(lnLayerCombo, lnLayerModel, cfg.lineLayerName)
-            if (lnLayerCombo.currentIndex     < 0) lnLayerCombo.currentIndex     = 0
-            cullCountCheck.checked = cfg.cullByCount
-            cullMaxSpin.value      = cfg.cullMaxPerDevice
-            cullAgeCheck.checked   = cfg.cullByAge
-            cullAgeCombo.currentIndex = 0
-            for (var ci = 0; ci < timeframeModel.count; ci++) {
-                if (timeframeModel.get(ci).minutes === cfg.cullAgeMinutes) {
-                    cullAgeCombo.currentIndex = ci
-                    break
-                }
-            }
-            incidentRefCheck.checked        = cfg.incidentRefEnabled
-            settingsDialog.localUseDisplay  = cfg.useDisplayAsTag
-            sessionTagField.text            = cfg.sessionTag
-            populateFieldNames(fieldNameModel, cfg.appendLayerName)
-            restoreSelection(incidentRefFieldCombo, fieldNameModel, cfg.incidentRefField)
-            // Event Layer (Fetch from Feature)
-            populateAllLayers(allLayerModel)
-            restoreSelection(eventLayerCombo, allLayerModel, cfg.eventLayerName)
-            if (eventLayerCombo.currentIndex < 0) eventLayerCombo.currentIndex = 0
-            var _evItem = allLayerModel.get(eventLayerCombo.currentIndex)
-            var _evName = (_evItem && !_evItem.isHeader && _evItem.name !== "— none —")
-                          ? _evItem.name : ""
-            populateEventFields(eventFieldModel, _evName)
-            restoreSelection(eventDisplayFieldCombo, eventFieldModel, cfg.eventDisplayField)
-            if (eventDisplayFieldCombo.currentIndex < 0) eventDisplayFieldCombo.currentIndex = 0
-            restoreSelection(eventStartFieldCombo,   eventFieldModel, cfg.eventStartField)
-            if (eventStartFieldCombo.currentIndex < 0) eventStartFieldCombo.currentIndex = 0
-            restoreSelection(eventEndFieldCombo,     eventFieldModel, cfg.eventEndField)
-            if (eventEndFieldCombo.currentIndex < 0) eventEndFieldCombo.currentIndex = 0
-        }
-
-        function saveSettings() {
-            cfg.serverUrl   = urlField.text.trim().replace(/\/+$/, "")
-            cfg.username    = userField.text.trim()
-            cfg.password    = passField.text
-            cfg.intervalMin = intervalSpin.value
-            if (liveLayerCombo.currentIndex >= 0 && ptLayerModel.count > 0) {
-                var liveItem = ptLayerModel.get(liveLayerCombo.currentIndex)
-                cfg.liveLayerName = (liveItem && !liveItem.isHeader
-                                     && liveItem.name !== "— no layer —")
-                                    ? liveItem.name : ""
-            }
-            if (appendLayerCombo.currentIndex >= 0 && ptLayerModel.count > 0) {
-                var appItem = ptLayerModel.get(appendLayerCombo.currentIndex)
-                cfg.appendLayerName = (appItem && !appItem.isHeader
-                                       && appItem.name !== "— no layer —")
-                                      ? appItem.name : ""
-            }
-            if (lnLayerCombo.currentIndex >= 0 && lnLayerModel.count > 0) {
-                var lnItem = lnLayerModel.get(lnLayerCombo.currentIndex)
-                cfg.lineLayerName = (lnItem && !lnItem.isHeader
-                                     && lnItem.name !== "— no layer —")
-                                    ? lnItem.name : ""
-            }
-            cfg.cullByCount      = cullCountCheck.checked
-            cfg.cullMaxPerDevice = cullMaxSpin.value
-            cfg.cullByAge        = cullAgeCheck.checked
-            if (cullAgeCombo.currentIndex >= 0)
-                cfg.cullAgeMinutes = timeframeModel.get(cullAgeCombo.currentIndex).minutes
-            cfg.incidentRefEnabled  = incidentRefCheck.checked
-            cfg.useDisplayAsTag     = settingsDialog.localUseDisplay
-            if (incidentRefFieldCombo.currentIndex >= 0 && fieldNameModel.count > 0) {
-                var refItem = fieldNameModel.get(incidentRefFieldCombo.currentIndex)
-                cfg.incidentRefField = (refItem && !refItem.isHeader) ? refItem.name : ""
-            } else {
-                cfg.incidentRefField = ""
-            }
-            cfg.sessionTag = sessionTagField.text.trim()
-            // Event Layer (Fetch from Feature)
-            var _evL = (eventLayerCombo.currentIndex >= 0 && allLayerModel.count > 0)
-                       ? allLayerModel.get(eventLayerCombo.currentIndex) : null
-            cfg.eventLayerName = (_evL && !_evL.isHeader && _evL.name !== "— none —")
-                                 ? _evL.name : ""
-            var _evD = (eventDisplayFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
-                       ? eventFieldModel.get(eventDisplayFieldCombo.currentIndex) : null
-            cfg.eventDisplayField = (_evD && !_evD.isHeader && _evD.name !== "— none —")
-                                    ? _evD.name : ""
-            var _evS = (eventStartFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
-                       ? eventFieldModel.get(eventStartFieldCombo.currentIndex) : null
-            cfg.eventStartField = (_evS && !_evS.isHeader && _evS.name !== "— none —")
-                                  ? _evS.name : ""
-            var _evE = (eventEndFieldCombo.currentIndex >= 0 && eventFieldModel.count > 0)
-                       ? eventFieldModel.get(eventEndFieldCombo.currentIndex) : null
-            cfg.eventEndField = (_evE && !_evE.isHeader && _evE.name !== "— none —")
-                                ? _evE.name : ""
-            if (refreshTimer.running) refreshTimer.restart()
-            mainWindow.displayToast("Settings saved")
-            settingsDialog.close()
+        onOpened: loadControls()
+        onPageChanged: if (visible) loadControls()
+        onClosed: {
+            commitText()
             mainDialog.open()
         }
 
-        // ── Section selector + paged content ──────────────────────────────
-        ButtonGroup { id: settingsSectionGroup }
-
-        ScrollView {
-            width:        parent.width
-            height:       Math.min(implicitHeight, mainWindow.height * 0.88)
-            contentWidth: parent.width
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-            ColumnLayout {
-                width:   parent.width
-                spacing: 8
-
-                // ── Radio nav (single row) ─────────────────────────────────
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing:          0
-
-                    RadioButton {
-                        id:    s1Radio
-                        text:  "Connection"
-                        checked: true
-                        ButtonGroup.group: settingsSectionGroup
-                        Layout.fillWidth: true
-                        font.pixelSize:   11
-                    }
-                    RadioButton {
-                        id:    s2Radio
-                        text:  "Layers"
-                        ButtonGroup.group: settingsSectionGroup
-                        Layout.fillWidth: true
-                        font.pixelSize:   11
-                    }
-                    RadioButton {
-                        id:    s3Radio
-                        text:  "Feature"
-                        ButtonGroup.group: settingsSectionGroup
-                        Layout.fillWidth: true
-                        font.pixelSize:   11
-                    }
-                    RadioButton {
-                        id:    s4Radio
-                        text:  "Session Tag"
-                        ButtonGroup.group: settingsSectionGroup
-                        Layout.fillWidth: true
-                        font.pixelSize:   11
-                    }
-                }
-
-                // ══ Page 1 — Connection ════════════════════════════════════
-                ColumnLayout {
-                    visible:          s1Radio.checked
-                    Layout.fillWidth: true
-                    spacing:          6
-
-                    Label { text: "Server URL:" }
-                    TextField {
-                        id:               urlField
-                        Layout.fillWidth: true
-                        placeholderText:  "https://server.traccar.org"
-                        inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
-                    }
-                    Label { text: "Email / Username:" }
-                    TextField {
-                        id:               userField
-                        Layout.fillWidth: true
-                        inputMethodHints: Qt.ImhEmailCharactersOnly
-                    }
-                    Label { text: "Password:" }
-                    TextField {
-                        id:       passField
-                        Layout.fillWidth: true
-                        echoMode: TextInput.Password
-                    }
-                    Label { text: "Auto-refresh:" }
-                    RowLayout {
-                        SpinBox { id: intervalSpin; from: 1; to: 120; value: 3 }
-                        Label   { text: "min" }
-                    }
-                    RowLayout {
-                        CheckBox {
-                            id: histCheck
-                            checked: cfg.fetchHistory
-                            onCheckedChanged: cfg.fetchHistory = checked
-                        }
-                        Label {
-                            text: "Fetch full track history between refreshes"
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                            font.pixelSize: 12
-                        }
-                    }
-                    Label {
-                        visible:          cfg.fetchHistory
-                        Layout.fillWidth: true
-                        wrapMode:         Text.WordWrap
-                        font.pixelSize:   11
-                        color:            Theme.secondaryTextColor
-                        text: "Each auto-fetch pulls every GPS fix since the last fetch " +
-                              "(one API call per device). Intermediate points go to B and C. " +
-                              "Disable to fetch current positions only."
-                    }
-                    Button {
-                        text:             "Test Connection"
-                        Layout.fillWidth: true
-                        onClicked: {
-                            cfg.serverUrl = urlField.text.trim().replace(/\/+$/, "")
-                            cfg.username  = userField.text.trim()
-                            cfg.password  = passField.text
-                            testConnection()
-                        }
-                    }
-                }
-
-                // ══ Page 2 — Layers ═══════════════════════════════════════
-                ColumnLayout {
-                    visible:          s2Radio.checked
-                    Layout.fillWidth: true
-                    spacing:          6
-
-                    Label {
-                        text: "A — Live points\nCleared and replaced on every fetch. One point per device."
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12
-                    }
-                    ComboBox {
-                        id: liveLayerCombo; Layout.fillWidth: true
-                        model: ptLayerModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: liveLayerCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: liveLayerCombo.highlightedIndex === index
-                        }
-                    }
-
-                    Item { height: 2 }
-                    Label {
-                        text: "B — Accumulated points\nPositions appended on every fetch. Builds a full history."
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12
-                    }
-                    ComboBox {
-                        id: appendLayerCombo; Layout.fillWidth: true
-                        model: ptLayerModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: appendLayerCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: appendLayerCombo.highlightedIndex === index
-                        }
-                        onActivated: {
-                            var item = (currentIndex >= 0 && ptLayerModel.count > 0)
-                                ? ptLayerModel.get(currentIndex) : null
-                            var layerName = (item && !item.isHeader) ? item.name : ""
-                            var prevField = cfg.incidentRefField
-                            populateFieldNames(fieldNameModel, layerName)
-                            restoreSelection(incidentRefFieldCombo, fieldNameModel, prevField)
-                        }
-                    }
-
-                    Item { height: 2 }
-                    RowLayout {
-                        CheckBox {
-                            id: trackCheck; checked: cfg.appendTrack
-                            onCheckedChanged: cfg.appendTrack = checked
-                        }
-                        Label {
-                            text: "C — Tracks  (line layer, one per device)"
-                            Layout.fillWidth: true; font.pixelSize: 12
-                        }
-                    }
-                    ComboBox {
-                        id: lnLayerCombo; Layout.fillWidth: true
-                        enabled: cfg.appendTrack; model: lnLayerModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: lnLayerCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: lnLayerCombo.highlightedIndex === index
-                        }
-                    }
-
-                    Label {
-                        text: "Select '— no layer —' to disable a layer."
-                        font.pixelSize: 11; color: Theme.secondaryTextColor
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true
-                    }
-
-                    // Advanced — culling
-                    Button {
-                        Layout.fillWidth: true; flat: true
-                        text: (settingsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — layer B housekeeping"
-                        onClicked: settingsDialog.advancedOpen = !settingsDialog.advancedOpen
-                    }
-                    ColumnLayout {
-                        visible: settingsDialog.advancedOpen
-                        Layout.fillWidth: true; spacing: 6
-                        Label {
-                            text: "Automatically trim layer B after each live fetch."
-                            font.pixelSize: 11; color: Theme.secondaryTextColor
-                            wrapMode: Text.WordWrap; Layout.fillWidth: true
-                        }
-                        RowLayout {
-                            CheckBox { id: cullCountCheck; checked: cfg.cullByCount }
-                            Label { text: "Keep at most" }
-                            SpinBox {
-                                id: cullMaxSpin; from: 1; to: 100000; stepSize: 50
-                                editable: true; value: cfg.cullMaxPerDevice
-                                enabled: cullCountCheck.checked
-                            }
-                            Label {
-                                text: "pts / device"; Layout.fillWidth: true
-                                opacity: cullCountCheck.checked ? 1.0 : 0.6
-                            }
-                        }
-                        RowLayout {
-                            CheckBox { id: cullAgeCheck; checked: cfg.cullByAge }
-                            Label { text: "Remove points older than:"; Layout.fillWidth: true }
-                        }
-                        ComboBox {
-                            id: cullAgeCombo; Layout.fillWidth: true
-                            enabled: cullAgeCheck.checked; opacity: enabled ? 1.0 : 0.6
-                            model: timeframeModel; textRole: "label"
-                            delegate: ItemDelegate {
-                                width: cullAgeCombo.width
-                                contentItem: Text {
-                                    text: model.label; color: Theme.mainTextColor
-                                    font.pixelSize: 13; verticalAlignment: Text.AlignVCenter
-                                }
-                                highlighted: cullAgeCombo.highlightedIndex === index
-                            }
-                        }
-                        Label {
-                            text: "Track layer (C) is never culled."
-                            font.pixelSize: 11; color: Theme.secondaryTextColor
-                            wrapMode: Text.WordWrap; Layout.fillWidth: true
-                        }
-                    }
-                }
-
-                // ══ Page 3 — From Feature ═════════════════════════════════
-                ColumnLayout {
-                    visible:          s3Radio.checked
-                    Layout.fillWidth: true
-                    spacing:          6
-
-                    Label {
-                        text: "Pick a layer and date/time fields so Fetch Logs can derive " +
-                              "its time window directly from a selected feature.\n\n" +
-                              "When fetching from a feature the display field value " +
-                              "(e.g. incident_ref) is automatically used as the session tag " +
-                              "for those positions, if session tagging is enabled."
-                        font.pixelSize: 11; color: Theme.secondaryTextColor
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true
-                    }
-                    Label { text: "Layer:" }
-                    ComboBox {
-                        id: eventLayerCombo; Layout.fillWidth: true
-                        model: allLayerModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: eventLayerCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: eventLayerCombo.highlightedIndex === index
-                        }
-                        onActivated: {
-                            var item = (currentIndex >= 0 && allLayerModel.count > 0)
-                                       ? allLayerModel.get(currentIndex) : null
-                            var lname = (item && !item.isHeader && item.name !== "— none —")
-                                        ? item.name : ""
-                            var prevD = cfg.eventDisplayField
-                            var prevS = cfg.eventStartField
-                            var prevE = cfg.eventEndField
-                            populateEventFields(eventFieldModel, lname)
-                            restoreSelection(eventDisplayFieldCombo, eventFieldModel, prevD)
-                            if (eventDisplayFieldCombo.currentIndex < 0) eventDisplayFieldCombo.currentIndex = 0
-                            restoreSelection(eventStartFieldCombo, eventFieldModel, prevS)
-                            if (eventStartFieldCombo.currentIndex < 0) eventStartFieldCombo.currentIndex = 0
-                            restoreSelection(eventEndFieldCombo, eventFieldModel, prevE)
-                            if (eventEndFieldCombo.currentIndex < 0) eventEndFieldCombo.currentIndex = 0
-                        }
-                    }
-                    Label { text: "Display field  (shown in the feature picker):" }
-                    ComboBox {
-                        id: eventDisplayFieldCombo; Layout.fillWidth: true
-                        model: eventFieldModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: eventDisplayFieldCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: eventDisplayFieldCombo.highlightedIndex === index
-                        }
-                    }
-                    Label { text: "Start time field:" }
-                    ComboBox {
-                        id: eventStartFieldCombo; Layout.fillWidth: true
-                        model: eventFieldModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: eventStartFieldCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: eventStartFieldCombo.highlightedIndex === index
-                        }
-                    }
-                    Label { text: "End time field  (optional):" }
-                    ComboBox {
-                        id: eventEndFieldCombo; Layout.fillWidth: true
-                        model: eventFieldModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: eventEndFieldCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: eventEndFieldCombo.highlightedIndex === index
-                        }
-                    }
-
-                    Item { height: 4 }
-                    RowLayout {
-                        CheckBox {
-                            id: useAsTagCheck
-                            checked: settingsDialog.localUseDisplay
-                            onCheckedChanged: {
-                                settingsDialog.localUseDisplay = checked
-                                if (checked) incidentRefCheck.checked = true
-                            }
-                        }
-                        Label {
-                            text: "Use display field as session tag when fetching from this feature"
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                        }
-                    }
-                    Label {
-                        visible: useAsTagCheck.checked
-                        text: "The display field value (e.g. incident_ref) will be written into the " +
-                              "tag field configured on the Session Tag page."
-                        font.pixelSize: 11; color: Theme.secondaryTextColor
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true
-                    }
-                }
-
-                // ══ Page 4 — Session Tag ══════════════════════════════════
-                ColumnLayout {
-                    visible:          s4Radio.checked
-                    Layout.fillWidth: true
-                    spacing:          6
-
-                    Label {
-                        text: "Stamp a text tag on every point and track written to layers A, B and C."
-                        font.pixelSize: 11; color: Theme.secondaryTextColor
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true
-                    }
-                    RowLayout {
-                        CheckBox {
-                            id: incidentRefCheck
-                            checked: cfg.incidentRefEnabled
-                        }
-                        Label {
-                            text: "Enable session tagging"
-                            Layout.fillWidth: true
-                        }
-                    }
-                    Label {
-                        text: "Tag value  (stamped on every fetched feature):"
-                        enabled: incidentRefCheck.checked
-                        opacity: enabled ? 1.0 : 0.6
-                    }
-                    TextField {
-                        id:              sessionTagField
-                        Layout.fillWidth: true
-                        placeholderText: "e.g. FIRE-2026-001"
-                        enabled:         incidentRefCheck.checked
-                        opacity:         enabled ? 1.0 : 0.6
-                    }
-                    Label {
-                        text: "Write tag into field  (on layer B — accumulated points):"
-                        enabled: incidentRefCheck.checked
-                        opacity: enabled ? 1.0 : 0.6
-                    }
-                    ComboBox {
-                        id: incidentRefFieldCombo
-                        Layout.fillWidth: true
-                        enabled: incidentRefCheck.checked
-                        opacity: enabled ? 1.0 : 0.6
-                        model: fieldNameModel; textRole: "name"
-                        delegate: ItemDelegate {
-                            width: incidentRefFieldCombo.width; enabled: !model.isHeader
-                            contentItem: Text {
-                                text: model.name; verticalAlignment: Text.AlignVCenter
-                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
-                                font.pixelSize: model.isHeader ? 10 : 13
-                                leftPadding: model.isHeader ? 4 : 12
-                            }
-                            highlighted: incidentRefFieldCombo.highlightedIndex === index
-                        }
-                    }
-                    Item { height: 4 }
-                    RowLayout {
-                        enabled: incidentRefCheck.checked
-                        opacity: enabled ? 1.0 : 0.6
-                        CheckBox {
-                            id: useDisplayFieldCheck
-                            checked: settingsDialog.localUseDisplay
-                            onCheckedChanged: settingsDialog.localUseDisplay = checked
-                        }
-                        Label {
-                            text: "Use display field as tag when fetching from a feature"
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                        }
-                    }
-                    Label {
-                        visible: settingsDialog.localUseDisplay && incidentRefCheck.checked
-                        text: "When 'From Feature' is used in Fetch Logs, the selected feature's " +
-                              "display field value overrides the tag value above."
-                        font.pixelSize: 11; color: Theme.secondaryTextColor
-                        wrapMode: Text.WordWrap; Layout.fillWidth: true
-                    }
-                }
-
-                // ── Save / Cancel (always visible) ─────────────────────────
-                Item { height: 8 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-                    Button {
-                        text: "Cancel"; Layout.fillWidth: true
-                        onClicked: { settingsDialog.close(); mainDialog.open() }
-                    }
-                    Button {
-                        text: "Save"; Layout.fillWidth: true
-                        onClicked: settingsDialog.saveSettings()
-                    }
-                }
-                Item { height: 8 }
+        // Text fields apply when editing finishes; this catches a field still being edited
+        function commitText() {
+            var url = urlField.text.trim().replace(/\/+$/, "")
+            if (url !== cfg.serverUrl || userField.text.trim() !== cfg.username
+                    || passField.text !== cfg.password) {
+                cfg.serverUrl = url
+                cfg.username  = userField.text.trim()
+                cfg.password  = passField.text
+                plugin.connState = ""
             }
+            if (sessionTagField.text.trim() !== cfg.sessionTag) cfg.sessionTag = sessionTagField.text.trim()
         }
-    }
 
-    // ════════════════════════════════════════════════════════════════════════
-    //  FETCH LOGS DIALOG
-    // ════════════════════════════════════════════════════════════════════════
-    Dialog {
-        id:      fetchLogsDialog
-        parent:  mainWindow.contentItem
-        visible: false
-        modal:   true
-        width:   Math.min(mainWindow.width * 0.92, 420)
-        x:       (mainWindow.width  - width)  / 2
-        y:       (mainWindow.height - height) * 0.08
-
-        // Runtime state
-        property var    fetchDevices:  []
-        property bool   fetchLogBusy:  false
-        property string fetchStatus:   "Loading devices…"
-        property bool   advancedOpen:  false
-
-        header: ToolBar {
-            background: Rectangle { color: "#1565C0" }
-            RowLayout {
-                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
-                Label {
-                    text:             "📅  Fetch Logs"
-                    color:            "white"
-                    font.pixelSize:   16
-                    font.bold:        true
-                    Layout.fillWidth: true
-                }
-                ToolButton {
-                    contentItem: Text {
-                        text: "🔧"
-                        color: "white"
-                        font.pixelSize: 18
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:   Text.AlignVCenter
-                    }
-                    background: Item {}
-                    onClicked: { fetchLogsDialog.close(); settingsDialog.open() }
-                    ToolTip.visible: hovered
-                    ToolTip.text:    "Switch to Settings"
-                }
+        function loadControls() {
+            urlField.text        = cfg.serverUrl
+            userField.text       = cfg.username
+            passField.text       = cfg.password
+            sessionTagField.text = cfg.sessionTag
+            if (page === "layers") {
+                populateLayers(ptLayerModel, Qgis.GeometryType.Point)
+                restoreSelection(pointsLayerCombo, ptLayerModel, cfg.pointsLayerName)
+                if (pointsLayerCombo.currentIndex < 0) pointsLayerCombo.currentIndex = 0
+                populateLayers(lnLayerModel, Qgis.GeometryType.Line)
+                restoreSelection(tracksLayerCombo, lnLayerModel, cfg.tracksLayerName)
+                if (tracksLayerCombo.currentIndex < 0) tracksLayerCombo.currentIndex = 0
+                refreshNameFields()
+            } else if (page === "tag") {
+                populateFieldNames(fieldNameModel, [cfg.pointsLayerName, cfg.tracksLayerName])
+                restoreSelection(tagFieldCombo, fieldNameModel, cfg.incidentRefField)
+                if (tagFieldCombo.currentIndex < 0) tagFieldCombo.currentIndex = 0
+            } else if (page === "advanced") {
+                populateAllLayers(allLayerModel)
+                restoreSelection(eventLayerCombo, allLayerModel, cfg.eventLayerName)
+                if (eventLayerCombo.currentIndex < 0) eventLayerCombo.currentIndex = 0
+                refreshEventFields()
             }
         }
 
-        standardButtons: Dialog.Close
-        onRejected: mainDialog.open()
+        function refreshNameFields() {
+            populateNameFields(ptNameFieldModel, cfg.pointsLayerName)
+            restoreSelection(pointsNameCombo, ptNameFieldModel, cfg.pointsNameField)
+            if (pointsNameCombo.currentIndex < 0) pointsNameCombo.currentIndex = 0
+            populateNameFields(lnNameFieldModel, cfg.tracksLayerName)
+            restoreSelection(tracksNameCombo, lnNameFieldModel, cfg.tracksNameField)
+            if (tracksNameCombo.currentIndex < 0) tracksNameCombo.currentIndex = 0
+        }
 
-        // Radio group: which time-window mode is active
-        ButtonGroup { id: rangeMode }
-        // Radio group: which direction when deriving window from a feature
-        ButtonGroup { id: featureWindowGroup }
-
-        onOpened: {
-            var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
-            fromDateField.text = today
-            toDateField.text   = today
-            quickRangeCombo.currentIndex = 0
-            populateEventFeatures()
-            loadFetchDevices()
+        function refreshEventFields() {
+            populateEventFields(eventFieldModel, cfg.eventLayerName)
+            restoreSelection(eventDisplayCombo, eventFieldModel, cfg.eventDisplayField)
+            if (eventDisplayCombo.currentIndex < 0) eventDisplayCombo.currentIndex = 0
+            restoreSelection(eventStartCombo, eventFieldModel, cfg.eventStartField)
+            if (eventStartCombo.currentIndex < 0) eventStartCombo.currentIndex = 0
+            restoreSelection(eventEndCombo, eventFieldModel, cfg.eventEndField)
+            if (eventEndCombo.currentIndex < 0) eventEndCombo.currentIndex = 0
         }
 
         ScrollView {
-            width:        parent.width
-            height:       Math.min(implicitHeight, mainWindow.height * 0.7)
-            contentWidth: parent.width
+            id: settingsScroll
+            anchors.fill: parent
+            contentWidth: availableWidth
+            clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width:   parent.width
+                width:   settingsScroll.availableWidth
                 spacing: 6
 
-                // ── Time window ────────────────────────────────────────────
-                Label {
-                    text: "── Time Window ──"
-                    font.bold: true
+                // ══ List of pages ══════════════════════════════════════════
+                ColumnLayout {
+                    visible: settingsDialog.page === ""
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    SettingsRow {
+                        title:   "Connection"
+                        onClicked: settingsDialog.page = "connection"
+                        warn:    !plugin.isConnected() || (plugin.connState !== "" && plugin.connState !== "ok")
+                        summary: {
+                            var host = cfg.serverUrl.replace(/^https?:\/\//, "")
+                            if (cfg.username === "") return "⚠ Not set up — tap to connect"
+                            var st = plugin.connState === "ok" ? "✓ connected"
+                                   : plugin.connState === ""   ? "not tested"
+                                   : "✕ " + plugin.connState
+                            return host + "  ·  " + cfg.username + "  ·  " + st
+                        }
+                    }
+                    SettingsRow {
+                        title:   "Layers"
+                        onClicked: settingsDialog.page = "layers"
+                        warn:    cfg.pointsLayerName === "" && cfg.tracksLayerName === ""
+                        summary: {
+                            if (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
+                                return "⚠ Nothing to save to yet"
+                            var p = cfg.pointsLayerName === "" ? "—" : cfg.pointsLayerName
+                                    + (cfg.pointsNameField !== "" ? " (name → " + cfg.pointsNameField + ")" : "")
+                            var t = cfg.tracksLayerName === "" ? "—" : cfg.tracksLayerName
+                                    + (cfg.tracksNameField !== "" ? " (name → " + cfg.tracksNameField + ")" : "")
+                            return "Positions → " + p + "\nTracks → " + t
+                        }
+                    }
+                    SettingsRow {
+                        title:   "Tag"
+                        onClicked: settingsDialog.page = "tag"
+                        summary: !cfg.incidentRefEnabled ? "Off"
+                                 : (cfg.sessionTag !== "" ? cfg.sessionTag : "(no text)")
+                                   + " → " + (cfg.incidentRefField !== "" ? cfg.incidentRefField : "⚠ no field")
+                    }
+                    SettingsRow {
+                        title:   "Advanced"
+                        onClicked: settingsDialog.page = "advanced"
+                        summary: "Refresh every " + cfg.liveIntervalSec + " s  ·  grey after "
+                                 + cfg.staleMinutes + " min\nFrom feature: "
+                                 + (cfg.eventLayerName !== "" ? cfg.eventLayerName : "not set up")
+                    }
+                    Hint {
+                        Layout.topMargin: 10
+                        text: "Changes apply straight away."
+                    }
                 }
 
-                // Mode selector
-                RowLayout {
+                // ══ Connection ═════════════════════════════════════════════
+                ColumnLayout {
+                    visible: settingsDialog.page === "connection"
                     Layout.fillWidth: true
+                    spacing: 4
+
+                    Label { text: "Server URL" }
+                    TextField {
+                        id: urlField
+                        Layout.fillWidth: true
+                        placeholderText:  "https://server.traccar.org"
+                        inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Label { text: "Email / username" }
+                    TextField {
+                        id: userField
+                        Layout.fillWidth: true
+                        inputMethodHints: Qt.ImhEmailCharactersOnly | Qt.ImhNoAutoUppercase
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Label { text: "Password" }
+                    TextField {
+                        id: passField
+                        Layout.fillWidth: true
+                        echoMode: TextInput.Password
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Test connection"
+                        onClicked: { settingsDialog.commitText(); testConnection() }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: plugin.connState !== ""
+                        wrapMode: Text.WordWrap
+                        text: plugin.connState === "ok" ? "✓ Connected" : "✕ " + plugin.connState
+                        color: plugin.connState === "ok" ? "#2E7D32" : "#B71C1C"
+                    }
+                    Hint { text: "Use the same address you open in a browser for Traccar." }
+                }
+
+                // ══ Layers ═════════════════════════════════════════════════
+                ColumnLayout {
+                    visible: settingsDialog.page === "layers"
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Label { text: "📍 Positions"; font.bold: true; font.pixelSize: 15 }
+                    Label { text: "Layer" }
+                    PickCombo {
+                        id: pointsLayerCombo
+                        model: ptLayerModel
+                        onActivated: {
+                            cfg.pointsLayerName = pickedName(pointsLayerCombo, ptLayerModel)
+                            settingsDialog.refreshNameFields()
+                        }
+                    }
+                    Label { text: "Device name goes into"; visible: cfg.pointsLayerName !== "" }
+                    PickCombo {
+                        id: pointsNameCombo
+                        visible: cfg.pointsLayerName !== ""
+                        model: ptNameFieldModel
+                        onActivated: cfg.pointsNameField = pickedName(pointsNameCombo, ptNameFieldModel)
+                    }
+                    ButtonGroup { id: pointsModeGroup }
                     RadioButton {
-                        id:    quickRangeRadio
-                        text:  "Time period"
-                        ButtonGroup.group: rangeMode
-                        checked: true
-                        font.pixelSize: 12
+                        visible: cfg.pointsLayerName !== ""
+                        text: "Save the latest fix per device"
+                        ButtonGroup.group: pointsModeGroup
+                        checked: cfg.pointsMode === 0
+                        onToggled: if (checked) cfg.pointsMode = 0
                     }
                     RadioButton {
-                        id:    customDatesRadio
-                        text:  "Custom dates"
-                        ButtonGroup.group: rangeMode
-                        font.pixelSize: 12
+                        visible: cfg.pointsLayerName !== ""
+                        text: "Save every fix in the time window"
+                        ButtonGroup.group: pointsModeGroup
+                        checked: cfg.pointsMode === 1
+                        onToggled: if (checked) cfg.pointsMode = 1
+                    }
+
+                    Item { height: 8 }
+                    Label { text: "〰 Tracks"; font.bold: true; font.pixelSize: 15 }
+                    Label { text: "Layer" }
+                    PickCombo {
+                        id: tracksLayerCombo
+                        model: lnLayerModel
+                        onActivated: {
+                            cfg.tracksLayerName = pickedName(tracksLayerCombo, lnLayerModel)
+                            settingsDialog.refreshNameFields()
+                        }
+                    }
+                    Label { text: "Device name goes into"; visible: cfg.tracksLayerName !== "" }
+                    PickCombo {
+                        id: tracksNameCombo
+                        visible: cfg.tracksLayerName !== ""
+                        model: lnNameFieldModel
+                        onActivated: cfg.tracksNameField = pickedName(tracksNameCombo, lnNameFieldModel)
+                    }
+                    ButtonGroup { id: trackModeGroup }
+                    RadioButton {
+                        visible: cfg.tracksLayerName !== ""
+                        text: "Add a new track each save"
+                        ButtonGroup.group: trackModeGroup
+                        checked: cfg.trackMode === 0
+                        onToggled: if (checked) cfg.trackMode = 0
                     }
                     RadioButton {
-                        id:    fromFeatureRadio
-                        text:  "From feature"
-                        ButtonGroup.group: rangeMode
-                        font.pixelSize: 12
+                        visible: cfg.tracksLayerName !== ""
+                        text: "Keep only the most recent track"
+                        ButtonGroup.group: trackModeGroup
+                        checked: cfg.trackMode === 1
+                        onToggled: if (checked) cfg.trackMode = 1
+                    }
+                    Hint {
+                        visible: cfg.tracksLayerName !== "" && cfg.trackMode === 1
+                        text: "Replaces that device's earlier tracks — matched by device_id, " +
+                              "or by the device name field if the layer has no device_id."
+                    }
+                    Item { height: 6 }
+                    Hint {
+                        text: "Fields are filled when the layer has them: device_id, name, fix_time, " +
+                              "fix_local, speed_kmh, course, altitude_m, accuracy_m, battery, address, motion, " +
+                              "fetched_at (points); start_time, last_update, start_local, last_local, " +
+                              "from_time, to_time, n_points, saved_at (tracks). " +
+                              "traccar_template.gpkg has them all."
                     }
                 }
 
-                // ── Time period ────────────────────────────────────────────
-                ComboBox {
-                    id:               quickRangeCombo
+                // ══ Tag ════════════════════════════════════════════════════
+                ColumnLayout {
+                    visible: settingsDialog.page === "tag"
                     Layout.fillWidth: true
-                    visible:          quickRangeRadio.checked
-                    model:            timeframeModel
-                    textRole:         "label"
-                    delegate: ItemDelegate {
-                        width: quickRangeCombo.width
-                        contentItem: Text {
-                            text:              model.label
-                            color:             Theme.mainTextColor
-                            font.pixelSize:    13
+                    spacing: 4
+
+                    Hint { text: "Stamp a text, e.g. an incident number, onto every point and track you save." }
+                    CheckBox {
+                        text: "Tag saved features"
+                        checked: cfg.incidentRefEnabled
+                        onToggled: cfg.incidentRefEnabled = checked
+                    }
+                    Label { text: "Tag text"; enabled: cfg.incidentRefEnabled }
+                    TextField {
+                        id: sessionTagField
+                        Layout.fillWidth: true
+                        enabled: cfg.incidentRefEnabled
+                        placeholderText: "e.g. FIRE-2026-001"
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Label { text: "Write it into field"; enabled: cfg.incidentRefEnabled }
+                    PickCombo {
+                        id: tagFieldCombo
+                        enabled: cfg.incidentRefEnabled
+                        model: fieldNameModel
+                        onActivated: cfg.incidentRefField = pickedName(tagFieldCombo, fieldNameModel)
+                    }
+                    CheckBox {
+                        id: displayTagCheck
+                        enabled: cfg.incidentRefEnabled
+                        text: "With 'From feature', use the feature's display value instead"
+                        checked: cfg.useDisplayAsTag
+                        onToggled: cfg.useDisplayAsTag = checked
+                        contentItem: Label {
+                            leftPadding: displayTagCheck.indicator.width + displayTagCheck.spacing
+                            text: displayTagCheck.text
+                            wrapMode: Text.WordWrap
                             verticalAlignment: Text.AlignVCenter
                         }
-                        highlighted: quickRangeCombo.highlightedIndex === index
-                    }
-                }
-
-                // ── Custom dates ───────────────────────────────────────────
-                Label {
-                    text:    "From (date + time, local):"
-                    visible: customDatesRadio.checked
-                    font.pixelSize: 12
-                }
-                TextField {
-                    id:               fromDateField
-                    Layout.fillWidth: true
-                    visible:          customDatesRadio.checked
-                    placeholderText:  "YYYY-MM-DD HH:MM"
-                    inputMethodHints: Qt.ImhNone
-                }
-                Label {
-                    text:    "To (date + time, local):"
-                    visible: customDatesRadio.checked
-                    font.pixelSize: 12
-                }
-                TextField {
-                    id:               toDateField
-                    Layout.fillWidth: true
-                    visible:          customDatesRadio.checked
-                    placeholderText:  "YYYY-MM-DD HH:MM"
-                    inputMethodHints: Qt.ImhNone
-                }
-
-                // ── From feature ───────────────────────────────────────────
-                Label {
-                    text:    "Feature:"
-                    visible: fromFeatureRadio.checked
-                }
-                RowLayout {
-                    visible:          fromFeatureRadio.checked
-                    Layout.fillWidth: true
-                    ComboBox {
-                        id:               eventFeatureCombo
                         Layout.fillWidth: true
-                        model:            eventFeatureModel
-                        textRole:         "label"
-                        delegate: ItemDelegate {
-                            width: eventFeatureCombo.width
-                            contentItem: Text {
-                                text:              model.label
-                                color:             model.fid < 0
-                                                   ? Theme.secondaryTextColor
-                                                   : Theme.mainTextColor
-                                font.pixelSize:    12
-                                verticalAlignment: Text.AlignVCenter
-                                wrapMode:          Text.WordWrap
-                                leftPadding:       4
-                            }
-                            highlighted: eventFeatureCombo.highlightedIndex === index
-                        }
-                    }
-                    ToolButton {
-                        contentItem: Text {
-                            text: "↻"; font.pixelSize: 16
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment:   Text.AlignVCenter
-                        }
-                        background: Item {}
-                        onClicked:  populateEventFeatures()
                     }
                 }
 
-                Label {
-                    text:    "Window:"
-                    visible: fromFeatureRadio.checked
-                }
-                RadioButton {
-                    id:    betweenRadio
-                    text:  "Between start and end  (end blank → 'now')"
-                    ButtonGroup.group: featureWindowGroup
-                    checked: true
-                    visible: fromFeatureRadio.checked
-                    font.pixelSize: 12
-                }
-                RadioButton {
-                    id:    forwardRadio
-                    text:  "Forward from start +"
-                    ButtonGroup.group: featureWindowGroup
-                    visible: fromFeatureRadio.checked
-                    font.pixelSize: 12
-                }
-                RadioButton {
-                    id:    backwardRadio
-                    text:  "Backward from end −"
-                    ButtonGroup.group: featureWindowGroup
-                    visible: fromFeatureRadio.checked
-                    font.pixelSize: 12
-                }
-                RowLayout {
-                    visible: fromFeatureRadio.checked &&
-                             (forwardRadio.checked || backwardRadio.checked)
-                    Layout.fillWidth: true
-                    Label { text: "Duration:" }
-                    SpinBox {
-                        id:       featureDurationSpin
-                        from:     1
-                        to:       14400
-                        stepSize: 15
-                        value:    120
-                        editable: true
-                    }
-                    Label { text: "min" }
-                }
-                Label {
-                    visible: fromFeatureRadio.checked &&
-                             (forwardRadio.checked || backwardRadio.checked)
-                    text: "Tip: 60 = 1 hour,  120 = 2 hours,  1440 = 1 day"
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                }
-
-                // ── Output layers (read-only info) ─────────────────────────
-                Item { height: 4 }
-                Label {
-                    text: {
-                        var parts = []
-                        if (cfg.appendLayerName !== "") parts.push("B — " + cfg.appendLayerName)
-                        if (cfg.lineLayerName    !== "") parts.push("C — " + cfg.lineLayerName)
-                        return parts.length > 0
-                            ? "Writes to:  " + parts.join(",  ")
-                            : "⚠  No output layers configured — set layers B / C in Settings"
-                    }
-                    color: (cfg.appendLayerName !== "" || cfg.lineLayerName !== "")
-                           ? Theme.secondaryTextColor : "#B71C1C"
-                    font.pixelSize:   11
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                }
-
-                // ── Advanced (point limit) ──────────────────────────────────
-                Item { height: 4 }
-                Button {
-                    Layout.fillWidth: true
-                    flat:    true
-                    text:    (fetchLogsDialog.advancedOpen ? "▾" : "▸") + "  Advanced — point limit"
-                    onClicked: fetchLogsDialog.advancedOpen = !fetchLogsDialog.advancedOpen
-                }
-
+                // ══ Advanced ═══════════════════════════════════════════════
                 ColumnLayout {
-                    visible:          fetchLogsDialog.advancedOpen
+                    visible: settingsDialog.page === "advanced"
                     Layout.fillWidth: true
-                    spacing:          6
+                    spacing: 4
 
+                    Label { text: "Live"; font.bold: true; font.pixelSize: 15 }
                     RowLayout {
-                        CheckBox {
-                            id:      fetchLimitPtsCheck
-                            checked: cfg.fetchLimitPts
-                            onCheckedChanged: cfg.fetchLimitPts = checked
-                        }
-                        Label { text: "Limit points written per device"; Layout.fillWidth: true }
-                    }
-
-                    RowLayout {
-                        Label {
-                            text: "Most recent"
-                            opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
-                        }
+                        Label { text: "Refresh every"; Layout.fillWidth: true }
                         SpinBox {
-                            id: fetchMaxPointsSpin
-                            from: 1; to: 100000; stepSize: 50
-                            editable: true
-                            value:   cfg.fetchMaxPoints
-                            enabled: fetchLimitPtsCheck.checked
-                            onValueModified: cfg.fetchMaxPoints = value
+                            from: 2; to: 300; editable: true
+                            value: cfg.liveIntervalSec
+                            onValueModified: cfg.liveIntervalSec = value
                         }
-                        Label {
-                            text: "points"
-                            opacity: fetchLimitPtsCheck.checked ? 1.0 : 0.6
+                        Label { text: "s" }
+                    }
+                    RowLayout {
+                        Label { text: "Grey marker after"; Layout.fillWidth: true }
+                        SpinBox {
+                            from: 1; to: 1440; editable: true
+                            value: cfg.staleMinutes
+                            onValueModified: cfg.staleMinutes = value
                         }
+                        Label { text: "min" }
                     }
 
-                    Label {
-                        text: "Caps the most-recent N positions per device written to B. Track layer (C) always gets the full set."
-                        font.pixelSize:   11
-                        color:            Theme.secondaryTextColor
-                        wrapMode:         Text.WordWrap
-                        Layout.fillWidth: true
-                    }
-                }
-
-                // ── Status ─────────────────────────────────────────────────
-                Item { height: 4 }
-                Label {
-                    text:             fetchLogsDialog.fetchStatus
-                    wrapMode:         Text.WordWrap
-                    Layout.fillWidth: true
-                    font.pixelSize:   12
-                    color: fetchLogsDialog.fetchStatus.charAt(0) === "✓"
-                           ? "#2E7D32"
-                           : Theme.secondaryTextColor
-                }
-
-                // ── Fetch button ───────────────────────────────────────────
-                Button {
-                    text:             fetchLogsDialog.fetchLogBusy ? "Fetching…" : "Fetch"
-                    Layout.fillWidth: true
-                    enabled:          !fetchLogsDialog.fetchLogBusy &&
-                                      fetchLogsDialog.fetchDevices.length > 0
-                    onClicked:        fetchLogs()
-                }
-
-                // ── Session fetch history ───────────────────────────────────
-                Item { height: 8 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label { text: "── Fetch History ──"; font.bold: true; Layout.fillWidth: true }
-                    Button {
-                        text: "Clear"; flat: true; font.pixelSize: 11
-                        visible: plugin.fetchLog.length > 0
-                        onClicked: plugin.fetchLog = []
-                    }
-                }
-
-                Label {
-                    visible:          plugin.fetchLog.length === 0
-                    Layout.fillWidth: true
-                    text:             "No fetches recorded yet this session."
-                    font.pixelSize:   11
-                    color:            Theme.secondaryTextColor
-                }
-
-                Repeater {
-                    model: {
-                        var arr = []
-                        var log = plugin.fetchLog
-                        for (var i = log.length - 1; i >= 0; i--) arr.push(log[i])
-                        return arr
-                    }
-                    delegate: Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight:   histCol.implicitHeight + 8
-                        color:            index % 2 === 0 ? "#EEF2FF" : "white"
-
-                        Column {
-                            id:      histCol
-                            anchors { fill: parent; margins: 5 }
-                            spacing: 2
-
-                            Label {
-                                width:          parent.width
-                                wrapMode:       Text.WordWrap
-                                font.bold:      true
-                                font.pixelSize: 11
-                                text: {
-                                    var tags = modelData.manual ? "manual" : "auto"
-                                    if (modelData.hist) tags += ", history"
-                                    return modelData.ts + "  [" + tags + "]"
-                                        + "  " + modelData.nDevs + " dev"
-                                        + (modelData.nDevs !== 1 ? "s" : "")
-                                        + "  " + modelData.nOnline + " online"
-                                        + "  " + modelData.nPts + " pts"
-                                }
-                            }
-                            Repeater {
-                                model: modelData.devs
-                                delegate: Label {
-                                    width:          parent.width
-                                    wrapMode:       Text.WordWrap
-                                    font.pixelSize: 10
-                                    color: modelData.status === "online"
-                                           ? Theme.mainTextColor : Theme.secondaryTextColor
-                                    text: (modelData.status === "online" ? "● " : "○ ")
-                                        + modelData.name
-                                        + "  pts=" + modelData.pts
-                                        + "  " + modelData.loc
-                                        + "  " + modelData.fix
-                                }
-                            }
+                    Item { height: 8 }
+                    Label { text: "Time window \"From feature\""; font.bold: true; font.pixelSize: 15 }
+                    Hint { text: "Pick a layer whose features have start (and optional end) times, e.g. incidents." }
+                    Label { text: "Layer" }
+                    PickCombo {
+                        id: eventLayerCombo
+                        model: allLayerModel
+                        onActivated: {
+                            cfg.eventLayerName = pickedName(eventLayerCombo, allLayerModel)
+                            settingsDialog.refreshEventFields()
                         }
                     }
+                    Label { text: "Name shown in the list"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventDisplayCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventDisplayField = pickedName(eventDisplayCombo, eventFieldModel)
+                    }
+                    Label { text: "Start time field"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventStartCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventStartField = pickedName(eventStartCombo, eventFieldModel)
+                    }
+                    Label { text: "End time field (optional)"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventEndCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventEndField = pickedName(eventEndCombo, eventFieldModel)
+                    }
                 }
-
                 Item { height: 8 }
             }
         }
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  FETCH LOGIC
+    //  TIME WINDOW
     // ════════════════════════════════════════════════════════════════════════
 
-    function fetchAll() {
-        if (plugin.fetchBusy) return
-        plugin.fetchBusy = true
-
-        _get("/api/devices", function(devData) {
-            var lookup = {}
-            devData.forEach(function(d) {
-                lookup[d.id] = { name: d.name || String(d.id), status: d.status || "unknown" }
-            })
-            plugin.deviceInfo = lookup
-
-            var nowIso  = new Date().toISOString()
-            var devIds  = Object.keys(lookup)
-
-            // ── History mode: pull every fix since the last fetch ─────────
-            if (cfg.fetchHistory && cfg.lastFetchIso !== "" && devIds.length > 0) {
-                var allPos  = []
-                var pending = devIds.length
-                var fromEnc = encodeURIComponent(cfg.lastFetchIso)
-                var toEnc   = encodeURIComponent(nowIso)
-
-                devIds.forEach(function(rawId) {
-                    // IIFE keeps rawId in closure correctly
-                    ;(function(devId) {
-                        _get("/api/positions?deviceId=" + devId
-                                + "&from=" + fromEnc + "&to=" + toEnc,
-                            function(hist) {
-                                for (var i = 0; i < hist.length; i++) allPos.push(hist[i])
-                                pending--
-                                if (pending === 0) {
-                                    // Always fetch last-known position for ALL devices
-                                    // (incl. offline ones not in the history window) for
-                                    // layer A and the device panel.
-                                    _get("/api/positions", function(liveData) {
-                                        _finalizeFetch(allPos, lookup, nowIso, liveData)
-                                    })
-                                }
-                            }
-                        )
-                    })(rawId)
-                })
+    // Returns {fromIso, toIso, endLimitIso, moving, trimMinutes, tag, label} or {error}
+    //  moving      — window still includes "now": Live keeps adding fixes
+    //  trimMinutes — "Last N" windows: drop fixes older than now − N on each refresh
+    //  endLimitIso — moving window with a fixed end in the future ("" = none)
+    function _computeWindow() {
+        var m   = cfg.windowMinutes
+        var now = new Date()
+        if (m > 0) {
+            return { fromIso: new Date(now.getTime() - m * 60000).toISOString(), toIso: now.toISOString(),
+                     endLimitIso: "", moving: true, trimMinutes: m, tag: "",
+                     label: windowModel.get(_windowIndex(m)).label }
+        }
+        var from, to, tag = ""
+        if (m === -1) {
+            from = _parseDate(cfg.customFrom)
+            to   = _parseDate(cfg.customTo)
+            if (!from || !to) return { error: "Enter From / To as YYYY-MM-DD HH:MM (time optional)" }
+            // Date-only "To" → include the whole day
+            if (cfg.customTo.trim().indexOf(" ") < 0)
+                to = new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59, 0)
+        } else {
+            if (eventFeatureModel.count === 0) populateEventFeatures()
+            var f = _selectedEventFeature()
+            if (!f) return { error: "Choose a feature (set the layer up in 🔧 Settings → Advanced)" }
+            var dur = cfg.featureDuration * 60000
+            if (cfg.featureSpan === 2) {
+                if (f.endIso === "") return { error: "That feature has no end time" }
+                to   = new Date(f.endIso)
+                from = new Date(to.getTime() - dur)
             } else {
-                // ── Current-positions-only mode ───────────────────────────
-                // /api/positions (no range) already returns the last-known fix
-                // for every device including offline — no extra call needed.
-                _get("/api/positions", function(posData) {
-                    _finalizeFetch(posData, lookup, nowIso)
-                })
+                if (f.startIso === "") return { error: "That feature has no start time" }
+                from = new Date(f.startIso)
+                to   = cfg.featureSpan === 1 ? new Date(from.getTime() + dur)
+                     : (f.endIso !== "" ? new Date(f.endIso) : null)   // null = ongoing
             }
-        })
+            if (cfg.useDisplayAsTag && f.disp !== "") tag = f.disp
+        }
+        if (to !== null && from >= to) return { error: "'From' must be before 'To'" }
+        var moving = to === null || to.getTime() > now.getTime()
+        return {
+            fromIso:     from.toISOString(),
+            toIso:       moving ? now.toISOString() : to.toISOString(),
+            endLimitIso: (moving && to !== null) ? to.toISOString() : "",
+            moving:      moving,
+            trimMinutes: 0,
+            tag:         tag,
+            label:       ""
+        }
     }
 
-    // ── Session fetch log ─────────────────────────────────────────────────
-    // Records one entry per fetch (auto + manual) matching the summary format
-    // used by the QGIS desktop plugin's Fetch Log tab.
-    // positions  — the raw positions array for the fetch window
-    // deviceInfo — {devId: {name, status}} lookup
-    // isManual   — true for Fetch Logs dialog, false for timer-based auto fetch
-    // isHist     — true when history mode (pulls a time window), false = snapshot
-    // fromIso / toIso — the UTC range used (empty string if snapshot)
-    function _addToFetchLog(positions, deviceInfo, isManual, isHist, fromIso, toIso) {
-        var ptsByDev  = {}
-        var lastByDev = {}
-        positions.forEach(function(p) {
-            var k = String(p.deviceId)
-            ptsByDev[k] = (ptsByDev[k] || 0) + 1
-            if (!lastByDev[k] || (p.fixTime || "") > (lastByDev[k].fixTime || ""))
-                lastByDev[k] = p
-        })
-        var devRows = []
-        var nOnline = 0
-        for (var devId in deviceInfo) {
-            var info = deviceInfo[devId]
-            if ((info.status || "") === "online") nOnline++
-            var last = lastByDev[String(devId)]
-            devRows.push({
-                name:   info.name   || String(devId),
-                status: info.status || "unknown",
-                pts:    ptsByDev[String(devId)] || 0,
-                loc:    last ? (parseFloat(last.latitude).toFixed(5)
-                                + ", " + parseFloat(last.longitude).toFixed(5)) : "—",
-                fix:    last ? String(last.fixTime || "")
-                                .substring(0, 19).replace("T", " ") : "—"
-            })
+    function windowSummary() {
+        if (plugin.statusMsg !== "") return plugin.statusMsg
+        var w = plugin.win
+        if (w === null) {
+            return cfg.liveOn ? "Loading…" : "Tap ▶ Live to follow devices, or 🔄 to load this window once."
         }
-        devRows.sort(function(a, b) { return a.name.localeCompare(b.name) })
-
-        var entry = {
-            ts:      Qt.formatTime(new Date(), "HH:mm:ss"),
-            manual:  isManual,
-            hist:    isHist,
-            nDevs:   devRows.length,
-            nOnline: nOnline,
-            nPts:    positions.length,
-            fromIso: fromIso || "",
-            toIso:   toIso   || "",
-            devs:    devRows
-        }
-        var log = plugin.fetchLog.slice()
-        log.push(entry)
-        plugin.fetchLog = log
-    }
-
-    // Called when all position data (current or historical) is assembled.
-    // liveData (optional) — last-known fix array from /api/positions with NO
-    //   date range.  When provided (history mode) it is used for the device panel
-    //   and layer A so offline devices that had no fixes in the history window
-    //   still appear at their last known location.
-    //   In current-positions-only mode liveData is undefined and `positions`
-    //   already is the last-known-per-device data, so no extra handling needed.
-    function _finalizeFetch(positions, deviceInfo, nowIso, liveData) {
-        var prevFetchIso = cfg.lastFetchIso   // capture before overwriting for log
-        // Decide which data feeds the device panel and layer A.
-        // liveData (if present) always contains exactly one last-known fix per
-        // device — Traccar guarantees this from /api/positions with no filter.
-        var liveSource = (liveData && liveData.length > 0) ? liveData : positions
-
-        // Latest fix per device → shown in the device list
-        var latestByDevice = {}
-        for (var i = 0; i < liveSource.length; i++) {
-            var pos = liveSource[i]
-            var k   = pos.deviceId
-            if (!latestByDevice[k] ||
-                    (pos.fixTime || "") > (latestByDevice[k].fixTime || ""))
-                latestByDevice[k] = pos
-        }
-        var latest = []
-        for (var key in latestByDevice) latest.push(latestByDevice[key])
-
-        plugin.positions   = latest
-        plugin.fetchBusy   = false
-        plugin.lastFetched = Qt.formatTime(new Date(), "hh:mm:ss")
-                           + "  -  " + latest.length + " device(s)"
-        if (positions.length > latest.length)
-            plugin.lastFetched += "  (" + positions.length + " pts)"
-
-        // A: live layer — always fed from last-known positions (incl. offline)
-        if (cfg.liveLayerName   !== "") _updateLiveLayer(latest,    deviceInfo)
-        // B+C: fed from the history range (or current positions in non-history mode)
-        if (cfg.appendLayerName !== "") {
-            _updateAppendLayer(positions, deviceInfo)
-            if (cfg.cullByCount || cfg.cullByAge) _cullAppendLayer()
-        }
-        if (cfg.appendTrack && cfg.lineLayerName !== "") _updateLineLayer(positions, deviceInfo)
-
-        cfg.lastFetchIso = nowIso
-
-        // Record auto-fetch in session log
-        _addToFetchLog(positions, deviceInfo, false, cfg.fetchHistory, prevFetchIso, nowIso)
-    }
-
-    function testConnection() {
-        mainWindow.displayToast("Testing…")
-        _get("/api/devices", function(data) {
-            mainWindow.displayToast("✓ Connected — " + data.length + " device(s)")
-        })
-    }
-
-    // ── Load device list into the Fetch Logs dialog ───────────────────────
-    function loadFetchDevices() {
-        fetchLogsDialog.fetchStatus  = "Loading devices…"
-        fetchLogsDialog.fetchDevices = []
-        fetchDevsModel.clear()
-        _get("/api/devices", function(data) {
-            fetchLogsDialog.fetchDevices = data
-            fetchDevsModel.clear()
-            for (var i = 0; i < data.length; i++) {
-                var d = data[i]
-                fetchDevsModel.append({
-                    label: (d.name || String(d.id)) + "  [" + (d.status || "?") + "]"
-                })
-            }
-            if (data.length > 0) {
-                fetchLogsDialog.fetchStatus =
-                    data.length + " device(s) found — set time range and tap Fetch"
-            } else {
-                fetchLogsDialog.fetchStatus = "No devices found on server"
-            }
-        })
+        var spanMs = new Date(w.toIso).getTime() - new Date(w.fromIso).getTime()
+        var big    = spanMs > 7 * 86400000 ? "\n⚠ Long window — loading and drawing may be slow." : ""
+        if (w.trimMinutes > 0)
+            return _spanText(w.fromIso, w.toIso) + "  ·  " + (cfg.liveOn ? "updating live" : "Live is off") + big
+        if (w.moving)
+            return _spanText(w.fromIso, w.toIso) + " (still running)  ·  "
+                   + (cfg.liveOn ? "updating live" : "Live is off") + big
+        return _spanText(w.fromIso, w.toIso) + "  ·  past window" + (cfg.liveOn ? " — Live paused" : "") + big
     }
 
     // ── Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" text into a local Date ─────
-    // Date-only input → midnight local on that date.
-    // Date+time input → that exact local minute.
     function _parseDate(str) {
-        var s = str.trim()
-        // Split off optional time part
+        var s = String(str || "").trim()
         var tIdx = s.indexOf(" ")
         var timePart = (tIdx >= 0) ? s.substring(tIdx + 1).trim() : ""
         var datePart = (tIdx >= 0) ? s.substring(0, tIdx).trim()  : s
@@ -1785,608 +1639,579 @@ Item {
         return new Date(y, m, d, hr, mn, 0, 0)
     }
 
-    // ── Fetch historical positions for a custom time period ────────────────
-    function fetchLogs() {
-        if (fetchLogsDialog.fetchLogBusy) return
+    // ════════════════════════════════════════════════════════════════════════
+    //  LOADING  (map only — never writes to layers)
+    // ════════════════════════════════════════════════════════════════════════
 
-        var fromIso, toIso
+    function clearWindow() {
+        plugin.win          = null
+        plugin.tracks       = ({})
+        plugin.latest       = ({})
+        plugin.markerPos    = ({})
+        plugin.deviceRows   = []
+        plugin.overlayModel = []
+        plugin.trackModel   = []
+    }
 
-        if (quickRangeRadio.checked) {
-            // ── Time period ───────────────────────────────────────────────
-            var qrIdx     = quickRangeCombo.currentIndex
-            var qrMinutes = (qrIdx > 0) ? timeframeModel.get(qrIdx).minutes : 0
-            if (qrMinutes <= 0) {
-                fetchLogsDialog.fetchStatus = "Select a time period or switch to Custom dates"
-                return
-            }
-            var now = new Date()
-            fromIso = new Date(now.getTime() - qrMinutes * 60000).toISOString()
-            toIso   = now.toISOString()
+    function reloadWindow() {
+        clearWindow()
+        loadWindow()
+    }
 
-        } else if (customDatesRadio.checked) {
-            // ── Custom date range ─────────────────────────────────────────
-            var fromDate = _parseDate(fromDateField.text)
-            var toDate   = _parseDate(toDateField.text)
-            if (!fromDate || !toDate) {
-                fetchLogsDialog.fetchStatus = "Enter date/time as YYYY-MM-DD HH:MM (time optional)"
-                return
-            }
-            // If the user entered a date-only "To" (no space → no time), extend to
-            // 23:59:59 so the whole day is included.  If a time was provided, use it exactly.
-            var toHasTime = toDateField.text.trim().indexOf(" ") >= 0
-            var toDateEnd = toHasTime ? toDate
-                          : new Date(toDate.getFullYear(), toDate.getMonth(),
-                                     toDate.getDate(), 23, 59, 59, 0)
-            if (fromDate > toDateEnd) {
-                fetchLogsDialog.fetchStatus = "'From' must not be after 'To'"
-                return
-            }
-            fromIso = fromDate.toISOString()
-            toIso   = toDateEnd.toISOString()
+    // Full load: devices, current fixes, and every fix in the window per device
+    function loadWindow() {
+        if (plugin.loading && Date.now() - plugin.loadStarted < 60000) return
+        var w = _computeWindow()
+        if (w.error) { plugin.statusMsg = w.error; return }
+        plugin.statusMsg   = "Loading…"
+        plugin.loading     = true
+        plugin.loadStarted = Date.now()
 
-        } else {
-            // ── From feature ──────────────────────────────────────────────
-            var fi = eventFeatureCombo.currentIndex
-            if (fi < 0 || eventFeatureModel.count === 0) {
-                fetchLogsDialog.fetchStatus = "Select a feature"
-                return
-            }
-            var feat = eventFeatureModel.get(fi)
-            if (feat.fid < 0) {
-                fetchLogsDialog.fetchStatus = "Configure Event Layer in Settings first"
-                return
-            }
-            if (betweenRadio.checked) {
-                if (feat.startIso === "") {
-                    fetchLogsDialog.fetchStatus = "Selected feature has no start time value"
-                    return
+        var onErr = function(msg) {
+            plugin.loading   = false
+            plugin.statusMsg = ""
+            plugin.liveError = msg
+        }
+
+        _get("/api/devices", function(devData) {
+            var lookup = _lookupFromDevices(devData)
+            plugin.deviceInfo = lookup
+            plugin.connState  = "ok"
+            _get("/api/positions", function(posData) {
+                var latest = {}
+                posData.forEach(function(p) { if (_valid(p)) latest[String(p.deviceId)] = p })
+                var ids     = Object.keys(lookup)
+                var byDev   = {}
+                var failed  = 0
+                var pending = ids.length
+                var done = function() {
+                    if (--pending > 0) return
+                    plugin.loading     = false
+                    plugin.liveError   = failed > 0 ? failed + " device(s) could not be loaded" : ""
+                    plugin.statusMsg   = ""
+                    plugin.win         = w
+                    plugin.tracks      = byDev
+                    plugin.latest      = latest
+                    plugin.lastFetched = Qt.formatTime(new Date(), "HH:mm:ss")
+                    _rebuildAll()
                 }
-                fromIso = new Date(feat.startIso).toISOString()
-                toIso   = feat.endIso !== ""
-                          ? new Date(feat.endIso).toISOString()
-                          : new Date().toISOString()
-            } else if (forwardRadio.checked) {
-                if (feat.startIso === "") {
-                    fetchLogsDialog.fetchStatus = "Selected feature has no start time value"
-                    return
-                }
-                var sd  = new Date(feat.startIso)
-                fromIso = sd.toISOString()
-                toIso   = new Date(sd.getTime() + featureDurationSpin.value * 60000).toISOString()
-            } else {
-                // backwardRadio
-                if (feat.endIso === "") {
-                    fetchLogsDialog.fetchStatus = "Selected feature has no end time value"
-                    return
-                }
-                var ed  = new Date(feat.endIso)
-                toIso   = ed.toISOString()
-                fromIso = new Date(ed.getTime() - featureDurationSpin.value * 60000).toISOString()
-            }
-        }
+                if (pending === 0) { pending = 1; done(); return }
+                ids.forEach(function(devId) {
+                    _get("/api/positions?deviceId=" + devId
+                            + "&from=" + encodeURIComponent(w.fromIso)
+                            + "&to="   + encodeURIComponent(w.toIso),
+                        function(hist) {
+                            var valid = hist.filter(_valid)
+                            valid.sort(_byFixTime)
+                            if (valid.length > 0) byDev[String(devId)] = valid
+                            done()
+                        },
+                        function(msg) { failed++; done() })
+                })
+            }, onErr)
+        }, function(msg) {
+            if (msg.indexOf("401") >= 0) plugin.connState = "wrong username or password"
+            onErr(msg)
+        })
+    }
 
-        if (cfg.appendLayerName === "" && cfg.lineLayerName === "") {
-            fetchLogsDialog.fetchStatus = "No output layers configured — set layers B / C in Settings"
-            return
-        }
+    // Live refresh: add each device's new fix to its track and move the window on
+    function pollLive() {
+        if (plugin.loading) return
+        if (plugin.win === null) { loadWindow(); return }
+        if (!plugin.win.moving) return
 
-        // Build device ID list and lookup — always all devices
-        var devs      = fetchLogsDialog.fetchDevices
-        var devIds    = []
-        var devLookup = {}
-        for (var i = 0; i < devs.length; i++) {
-            devIds.push(devs[i].id)
-            devLookup[devs[i].id] = {
-                name:   devs[i].name   || String(devs[i].id),
-                status: devs[i].status || ""
-            }
-        }
-
-        if (devIds.length === 0) {
-            fetchLogsDialog.fetchStatus = "No devices to fetch"
-            return
-        }
-
-        fetchLogsDialog.fetchLogBusy = true
-        fetchLogsDialog.fetchStatus  = "Fetching " + devIds.length + " device(s)…"
-
-        // Capture display value for auto-tagging when fetching from a feature
-        var featureDisplayValue = ""
-        if (fromFeatureRadio.checked) {
-            var _fi2 = eventFeatureCombo.currentIndex
-            if (_fi2 >= 0 && eventFeatureModel.count > 0) {
-                var _feat2 = eventFeatureModel.get(_fi2)
-                if (_feat2 && _feat2.fid >= 0)
-                    featureDisplayValue = _feat2.disp || ""
-            }
-        }
-
-        var fromEnc = encodeURIComponent(fromIso)
-        var toEnc   = encodeURIComponent(toIso)
-        var allPos  = []
-        var pending = devIds.length
-
-        devIds.forEach(function(rawId) {
-            ;(function(devId) {
-                _get("/api/positions?deviceId=" + devId
-                        + "&from=" + fromEnc + "&to=" + toEnc,
-                    function(hist) {
-                        for (var i = 0; i < hist.length; i++) allPos.push(hist[i])
-                        pending--
-                        if (pending > 0) return   // wait for all devices
-
-                        // All done — write to layers
-                        fetchLogsDialog.fetchLogBusy = false
-                        // Record in session log (even zero results, so user can see the attempt)
-                        _addToFetchLog(allPos, devLookup, true, false, fromIso, toIso)
-                        if (allPos.length === 0) {
-                            fetchLogsDialog.fetchStatus =
-                                "No positions found in this time range"
-                            return
-                        }
-
-                        // Auto-tag: override session tag with the feature's display value
-                        // (only when the user has enabled "Use display field as session tag")
-                        if (cfg.useDisplayAsTag && featureDisplayValue !== "")
-                            plugin.fetchTagOverride = featureDisplayValue
-
-                        var written = []
-                        if (cfg.appendLayerName !== "") {
-                            var ptsPos = allPos
-                            if (fetchLimitPtsCheck.checked) {
-                                var maxPts = fetchMaxPointsSpin.value
-                                var byDev  = {}
-                                allPos.forEach(function(p) {
-                                    (byDev[p.deviceId] = byDev[p.deviceId] || []).push(p)
-                                })
-                                ptsPos = []
-                                Object.keys(byDev).forEach(function(devId) {
-                                    var arr = byDev[devId]
-                                    arr.sort(function(a, b) {
-                                        return new Date(b.fixTime) - new Date(a.fixTime)
-                                    })
-                                    ptsPos = ptsPos.concat(arr.slice(0, maxPts))
-                                })
-                            }
-                            _updateAppendLayer(ptsPos, devLookup, true)
-                            written.push(ptsPos.length + " point(s)"
-                                         + (ptsPos.length !== allPos.length
-                                            ? " of " + allPos.length
-                                            : ""))
-                        }
-                        if (cfg.lineLayerName !== "") {
-                            _updateLineLayer(allPos, devLookup)
-                            var nDevs = {}
-                            for (var j = 0; j < allPos.length; j++)
-                                nDevs[allPos[j].deviceId] = true
-                            written.push(Object.keys(nDevs).length + " track(s) updated")
-                        }
-
-                        // Clear the override so normal fetches use cfg.sessionTag
-                        plugin.fetchTagOverride = ""
-
-                        fetchLogsDialog.fetchStatus =
-                            "✓  Done — " + written.join(",  ")
+        var onErr = function(msg) { plugin.liveError = msg }
+        _get("/api/devices", function(devData) {
+            plugin.deviceInfo = _lookupFromDevices(devData)
+            _get("/api/positions", function(posData) {
+                var w      = plugin.win
+                var now    = new Date()
+                var endMs  = w.endLimitIso !== "" ? new Date(w.endLimitIso).getTime() : Infinity
+                var fromMs = w.trimMinutes > 0 ? now.getTime() - w.trimMinutes * 60000
+                                               : new Date(w.fromIso).getTime()
+                var t = {}
+                for (var k in plugin.tracks) t[k] = plugin.tracks[k]
+                var latest = {}
+                posData.forEach(function(p) {
+                    if (!_valid(p)) return
+                    var key = String(p.deviceId)
+                    latest[key] = p
+                    var ms = new Date(p.fixTime).getTime()
+                    if (ms < fromMs || ms > endMs) return
+                    var arr  = t[key] || []
+                    var last = arr.length > 0 ? arr[arr.length - 1] : null
+                    if (!last || new Date(last.fixTime).getTime() < ms) t[key] = arr.concat([p])
+                })
+                // Move a "Last N" window on: drop fixes that fell out of it
+                if (w.trimMinutes > 0) {
+                    for (var k2 in t) {
+                        t[k2] = t[k2].filter(function(p) { return new Date(p.fixTime).getTime() >= fromMs })
+                        if (t[k2].length === 0) delete t[k2]
                     }
-                )
-            })(rawId)
+                }
+                var stillMoving = now.getTime() < endMs
+                plugin.win = { fromIso: new Date(fromMs).toISOString(),
+                               toIso: new Date(Math.min(now.getTime(), endMs)).toISOString(),
+                               endLimitIso: w.endLimitIso, moving: stillMoving,
+                               trimMinutes: w.trimMinutes, tag: w.tag, label: w.label }
+                plugin.tracks      = t
+                plugin.latest      = latest
+                plugin.liveError   = ""
+                plugin.lastFetched = Qt.formatTime(now, "HH:mm:ss")
+                _rebuildAll()
+            }, onErr)
+        }, onErr)
+    }
+
+    function _valid(p) {
+        return p && p.latitude !== undefined && p.longitude !== undefined && !!p.fixTime
+    }
+
+    function _byFixTime(a, b) {
+        return new Date(a.fixTime).getTime() - new Date(b.fixTime).getTime()
+    }
+
+    function _lookupFromDevices(devData) {
+        var lookup = {}
+        devData.forEach(function(d) {
+            lookup[d.id] = { name: d.name || String(d.id), status: d.status || "unknown" }
+        })
+        return lookup
+    }
+
+    // Markers, track lines and device rows from the loaded data
+    function _rebuildAll() {
+        var w = plugin.win
+        // Markers: current fix while the window includes now, else the last fix in the window
+        var mp = {}
+        if (w !== null && w.moving) {
+            for (var k in plugin.latest) mp[k] = plugin.latest[k]
+        } else {
+            for (var k2 in plugin.tracks) {
+                var arr = plugin.tracks[k2]
+                if (arr.length > 0) mp[k2] = arr[arr.length - 1]
+            }
+        }
+        plugin.markerPos = mp
+
+        var markers = []
+        for (var id in mp) {
+            var p     = mp[id]
+            var info  = plugin.deviceInfo[id] || {}
+            var attrs = p.attributes || {}
+            markers.push({
+                id:      id,
+                name:    info.name || id,
+                lon:     p.longitude,
+                lat:     p.latitude,
+                acc:     p.accuracy || 0,
+                fixTime: p.fixTime,
+                fresh:   _isFresh(p.fixTime),
+                speed:   p.speed || 0,
+                battery: (attrs.batteryLevel !== undefined) ? attrs.batteryLevel : null
+            })
+        }
+        plugin.overlayModel = markers
+
+        var lines = []
+        for (var tk in plugin.tracks) {
+            var pts = plugin.tracks[tk]
+            if (pts.length < 2) continue
+            var coords = pts.map(function(q) { return { lon: q.longitude, lat: q.latitude } })
+            lines.push({ id: tk, fresh: _isFresh(pts[pts.length - 1].fixTime),
+                         coords: _decimate(coords, 1500) })   // saving always uses every fix
+        }
+        plugin.trackModel = lines
+
+        var rows = []
+        for (var devId in plugin.deviceInfo) {
+            var key   = String(devId)
+            var dname = plugin.deviceInfo[devId].name || key
+            var tr    = plugin.tracks[key] || []
+            var pos   = mp[key] || null
+            var line  = tr.length > 0
+                ? tr.length + " fix" + (tr.length !== 1 ? "es" : "") + "  ·  "
+                  + (tr.length > 1 ? _spanText(tr[0].fixTime, tr[tr.length - 1].fixTime)
+                                   : _fmtLocal(tr[0].fixTime))
+                : "no fixes in window"
+            if (pos) {
+                line += "  ·  " + Math.round((pos.speed || 0) * 1.852) + " km/h"
+                var a = pos.attributes || {}
+                if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  🔋" + a.batteryLevel + "%"
+            }
+            rows.push({ name: dname, line: line, pos: pos, fresh: pos ? _isFresh(pos.fixTime) : false })
+        }
+        rows.sort(function(r1, r2) { return r1.name.localeCompare(r2.name) })
+        plugin.deviceRows = rows
+    }
+
+    function testConnection() {
+        plugin.connState = ""
+        mainWindow.displayToast("Testing…")
+        _get("/api/devices", function(data) {
+            plugin.connState = "ok"
+            plugin.liveError = ""
+            mainWindow.displayToast("✓ Connected — " + data.length + " device(s)")
+        }, function(msg) {
+            plugin.connState = msg.indexOf("401") >= 0 ? "wrong username or password" : msg
+            mainWindow.displayToast(msg)
         })
     }
 
     function zoomToDevice(pos) {
-        if (pos.longitude === undefined || pos.latitude === undefined) return
+        if (!pos || pos.longitude === undefined || pos.latitude === undefined) return
         try {
-            var wgs = CoordinateReferenceSystemUtils.fromDescription("EPSG:4326")
-            var dst = iface.mapCanvas().mapSettings.destinationCrs
+            var dst = plugin.mapCanvas.mapSettings.destinationCrs
             var rpt = GeometryUtils.reprojectPoint(
-                GeometryUtils.point(pos.longitude, pos.latitude), wgs, dst)
-            iface.mapCanvas().mapSettings.setCenter(rpt, true)
+                GeometryUtils.point(pos.longitude, pos.latitude), plugin.wgs84, dst)
+            plugin.mapCanvas.mapSettings.setCenter(rpt, true)
         } catch(e) {
             mainWindow.displayToast("Zoom error: " + e)
         }
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  SHARED POINT-WRITE HELPER
+    //  SAVE  — writes exactly what the time window shows
     // ════════════════════════════════════════════════════════════════════════
 
-
-    function _writePointsToLayer(lyr, positions, deviceInfo) {
-        var _tagText = plugin.fetchTagOverride !== "" ? plugin.fetchTagOverride : cfg.sessionTag
-        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== ""
-                                && _tagText !== "")
-                               ? _tagText : null
-
-        positions.forEach(function(pos) {
-            if (pos.latitude === undefined || pos.longitude === undefined) return
-            var info     = deviceInfo[pos.deviceId] || {}
-            var attrs    = pos.attributes || {}
-            var speedKmh = Math.round((pos.speed || 0) * 1.852 * 10) / 10
-            var battery  = (attrs.batteryLevel !== undefined) ? attrs.batteryLevel : null
-            var geom     = _geomForLayer(lyr, pos.longitude, pos.latitude)
-            var feat     = FeatureUtils.createFeature(lyr, geom)
-            var fnames   = lyr.fields.names
-            for (var i = 0; i < fnames.length; i++) {
-                switch (fnames[i]) {
-                    case "device_id":  feat.setAttribute(i, pos.deviceId || -1);                break
-                    case "name":       feat.setAttribute(i, info.name || String(pos.deviceId)); break
-                    case "status":     feat.setAttribute(i, info.status || "");                 break
-                    case "speed_kmh":  feat.setAttribute(i, speedKmh);                          break
-                    case "course":     feat.setAttribute(i, pos.course   || 0);                 break
-                    case "altitude_m": feat.setAttribute(i, pos.altitude  || 0);                break
-                    case "fix_time":   feat.setAttribute(i, pos.fixTime   || "");               break
-                    case "battery":    feat.setAttribute(i, battery);                            break
-                    case "address":    feat.setAttribute(i, pos.address   || "");               break
-                    case "motion":     feat.setAttribute(i, String(attrs.motion || ""));         break
-                    case "fetched_at": feat.setAttribute(i, new Date().toISOString());           break
-                    default:
-                        if (incidentRefValue !== null && fnames[i] === cfg.incidentRefField)
-                            feat.setAttribute(i, incidentRefValue)
-                        break
-                }
+    function savePositions() {
+        if (cfg.pointsLayerName === "") {
+            mainWindow.displayToast("Choose a layer for positions first")
+            openSettings("layers")
+            return
+        }
+        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap 🔄 or ▶ Live"); return }
+        var positions = []
+        if (cfg.pointsMode === 1) {
+            for (var k in plugin.tracks) positions = positions.concat(plugin.tracks[k])
+        } else {
+            for (var k2 in plugin.markerPos) positions.push(plugin.markerPos[k2])
+        }
+        if (positions.length === 0) { mainWindow.displayToast("No positions to save"); return }
+        var lookup = plugin.deviceInfo
+        var tag    = plugin.win.tag
+        _queueWrite(function() {
+            var lyr = _layerByName(cfg.pointsLayerName, "Positions")
+            if (!lyr) return
+            try {
+                lyr.startEditing()
+                var n = _writePointsToLayer(lyr, positions, lookup, tag)
+                if (!lyr.commitChanges()) throw "commit failed"
+                lyr.triggerRepaint()
+                mainWindow.displayToast("✓ Saved " + n + " point(s) to " + cfg.pointsLayerName)
+            } catch(e) {
+                try { lyr.rollBack() } catch(e2) {}
+                mainWindow.displayToast("Positions layer error: " + e)
             }
-            LayerUtils.addFeature(lyr, feat)
         })
     }
 
+    function saveTracks() {
+        if (cfg.tracksLayerName === "") {
+            mainWindow.displayToast("Choose a layer for tracks first")
+            openSettings("layers")
+            return
+        }
+        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap 🔄 or ▶ Live"); return }
+        var byDev = {}
+        var n = 0
+        for (var k in plugin.tracks) {
+            if (plugin.tracks[k].length > 0) { byDev[k] = plugin.tracks[k]; n++ }
+        }
+        if (n === 0) { mainWindow.displayToast("No fixes in this window to save"); return }
+        var info = { fromIso: plugin.win.fromIso, toIso: plugin.win.toIso,
+                     lookup: plugin.deviceInfo, tag: plugin.win.tag }
+        _queueWrite(function() {
+            var written = _writeTracks(byDev, info)
+            if (written >= 0) mainWindow.displayToast("✓ Saved " + written + " track(s) to " + cfg.tracksLayerName)
+        })
+    }
+
+    // Returns number of tracks written, or -1 on failure
+    function _writeTracks(byDev, info) {
+        var lyr = _layerByName(cfg.tracksLayerName, "Tracks")
+        if (!lyr) return -1
+        var fnames    = lyr.fields.names
+        var nameField = _nameFieldFor(fnames, cfg.tracksNameField)
+
+        // "Keep most recent": match earlier tracks by device_id, else by device name
+        var replace    = cfg.trackMode === 1
+        var matchField = fnames.indexOf("device_id") >= 0 ? "device_id" : nameField
+        if (replace && matchField === "") {
+            mainWindow.displayToast("Tracks layer has no device_id or device name field — adding instead of replacing")
+            replace = false
+        }
+        var matchKeys = {}   // value in matchField → true, for the devices being saved
+        for (var dk in byDev) {
+            var dl = info.lookup[dk] || info.lookup[parseInt(dk)] || {}
+            matchKeys[matchField === "device_id" ? String(parseInt(dk)) : String(dl.name || dk)] = true
+        }
+
+        var oldFids = []
+        if (replace) {
+            try {
+                var iter = LayerUtils.createFeatureIterator(lyr)
+                while (iter.hasNext()) {
+                    var f = iter.next()
+                    if (matchKeys[String(f.attribute(matchField))] === true) oldFids.push(f.id)
+                }
+                iter.close()
+            } catch(e) {
+                mainWindow.displayToast("Tracks layer read error: " + e)
+                return -1
+            }
+        }
+
+        var savedAt = new Date().toISOString()
+        var written = 0
+        try {
+            lyr.startEditing()
+            for (var i = 0; i < oldFids.length; i++) lyr.deleteFeature(oldFids[i])
+
+            for (var devKey in byDev) {
+                var pts = byDev[devKey]
+                var verts = []
+                for (var j = 0; j < pts.length; j++) {
+                    var xy = _xyForLayer(lyr, pts[j].longitude, pts[j].latitude)
+                    var z  = pts[j].altitude || 0
+                    var m  = Math.round(new Date(pts[j].fixTime).getTime() / 1000)
+                    verts.push(xy.x + " " + xy.y + " " + z + " " + m)
+                }
+                if (verts.length === 1) verts.push(verts[0])   // a line needs two vertices
+                var geom  = GeometryUtils.createGeometryFromWkt("LineStringZM (" + verts.join(", ") + ")")
+                var feat  = FeatureUtils.createFeature(lyr, geom)
+                var dinfo = info.lookup[devKey] || info.lookup[parseInt(devKey)] || {}
+                var vals = {
+                    device_id:   parseInt(devKey),
+                    name:        dinfo.name || devKey,
+                    start_time:  _isoUtc(pts[0].fixTime),
+                    last_update: _isoUtc(pts[pts.length - 1].fixTime),
+                    from_time:   _isoUtc(info.fromIso),
+                    to_time:     _isoUtc(info.toIso),
+                    n_points:    pts.length,
+                    saved_at:    savedAt,
+                    // optional text fields: local wall-clock time on this device
+                    start_local: _localText(pts[0].fixTime),
+                    last_local:  _localText(pts[pts.length - 1].fixTime)
+                }
+                if (nameField !== "") vals[nameField] = vals.name
+                _setAttributes(feat, fnames, vals, info.tag)
+                if (LayerUtils.addFeature(lyr, feat)) written++
+            }
+
+            if (!lyr.commitChanges()) throw "commit failed"
+            lyr.triggerRepaint()
+        } catch(e) {
+            try { lyr.rollBack() } catch(e2) {}
+            mainWindow.displayToast("Tracks layer error: " + e)
+            return -1
+        }
+        return written
+    }
+
+    // Returns number of points added
+    function _writePointsToLayer(lyr, positions, deviceInfo, tag) {
+        var fnames    = lyr.fields.names
+        var nameField = _nameFieldFor(fnames, cfg.pointsNameField)
+        var savedAt   = new Date().toISOString()
+        var added     = 0
+        positions.forEach(function(pos) {
+            var info  = deviceInfo[pos.deviceId] || {}
+            var attrs = pos.attributes || {}
+            var xy    = _xyForLayer(lyr, pos.longitude, pos.latitude)
+            var geom  = GeometryUtils.createGeometryFromWkt("POINT(" + xy.x + " " + xy.y + ")")
+            var feat  = FeatureUtils.createFeature(lyr, geom)
+            var vals  = {
+                device_id:  pos.deviceId || -1,
+                name:       info.name || String(pos.deviceId),
+                status:     info.status || "",
+                speed_kmh:  Math.round((pos.speed || 0) * 1.852 * 10) / 10,
+                course:     pos.course   || 0,
+                altitude_m: pos.altitude || 0,
+                accuracy_m: pos.accuracy || 0,
+                fix_time:   _isoUtc(pos.fixTime),
+                fix_local:  _localText(pos.fixTime),   // optional text field
+                battery:    (attrs.batteryLevel !== undefined) ? attrs.batteryLevel : null,
+                address:    pos.address || "",
+                motion:     String(attrs.motion || ""),
+                fetched_at: savedAt
+            }
+            if (nameField !== "") vals[nameField] = vals.name
+            _setAttributes(feat, fnames, vals, tag)
+            if (LayerUtils.addFeature(lyr, feat)) added++
+        })
+        return added
+    }
+
     // ════════════════════════════════════════════════════════════════════════
-    // ════════════════════════════════════════════════════════════════════════
-    //  CLOUD SYNC GUARD
-    //  QField exposes cloudConnection and cloudProjectsModel via objectName.
-    //  We check cloudConnection.status before any layer write so we never
-    //  call startEditing()/commitChanges() while a cloud sync is in progress.
-    //  Returns true = sync in progress → caller should skip the write.
-    //  Fails silently (returns false) if this is not a cloud project or the
-    //  API is unavailable, so non-cloud use is unaffected.
+    //  SHARED WRITE HELPERS
     // ════════════════════════════════════════════════════════════════════════
 
-    function _isSyncing() {
+    function _layerByName(name, label) {
+        var layers = qgisProject.mapLayersByName(name)
+        if (layers.length === 0) {
+            mainWindow.displayToast(label + " layer '" + name + "' not found")
+            return null
+        }
+        return layers[0]
+    }
+
+    // Field that receives the device name: the one picked in Settings if the layer
+    // still has it, else a field called 'name', else "" (name not written)
+    function _nameFieldFor(fnames, chosen) {
+        if (chosen !== "" && fnames.indexOf(chosen) >= 0) return chosen
+        return fnames.indexOf("name") >= 0 ? "name" : ""
+    }
+
+    // Fill fields by name; tagOverride (feature display value) beats cfg.sessionTag
+    function _setAttributes(feat, fnames, vals, tagOverride) {
+        var tagText  = (tagOverride && tagOverride !== "") ? tagOverride : cfg.sessionTag
+        var tagValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== "" && tagText !== "")
+                       ? tagText : null
+        for (var i = 0; i < fnames.length; i++) {
+            if (tagValue !== null && fnames[i] === cfg.incidentRefField)
+                feat.setAttribute(i, tagValue)
+            else if (vals[fnames[i]] !== undefined && vals[fnames[i]] !== null)
+                feat.setAttribute(i, vals[fnames[i]])
+        }
+    }
+
+    // ── Reproject lon/lat to the layer CRS ────────────────────────────────
+    function _xyForLayer(lyr, lon, lat) {
+        if (lyr.crs.authid === "EPSG:4326") return { x: lon, y: lat }
+        var pt = GeometryUtils.reprojectPoint(GeometryUtils.point(lon, lat), plugin.wgs84, lyr.crs)
+        return { x: pt.x, y: pt.y }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  TIME HANDLING
+    //  Traccar  — API times are ISO 8601 in UTC ("2026-10-09T08:15:30.000+00:00").
+    //  Storage  — always written as a UTC ISO string ("…Z"). A GeoPackage DateTime
+    //             field parses it to UTC (and GPKG requires UTC); a Text field keeps
+    //             an unambiguous timestamp. (A JS Date would arrive as a Qt LocalTime
+    //             value, which a Text field would store without any offset.)
+    //  Display  — Qt.formatDateTime() on a JS Date uses the device's time zone,
+    //             including the summer-time rule for that particular date.
+    //  *_local  — optional Text fields with the local wall-clock time at save time,
+    //             for QGIS desktop / exports, which otherwise show DateTime as UTC.
+    // ════════════════════════════════════════════════════════════════════════
+
+    function _isoUtc(iso) {
+        if (!iso) return null
+        var d = new Date(iso)
+        return isNaN(d.getTime()) ? null : d.toISOString()
+    }
+
+    function _localText(iso) {
+        if (!iso) return null
+        var d = new Date(iso)
+        return isNaN(d.getTime()) ? null : Qt.formatDateTime(d, "yyyy-MM-dd HH:mm:ss t")
+    }
+
+    // Event-layer attribute (DateTime → JS Date, or text) → UTC ISO string, "" if empty/invalid.
+    // Text without an offset (e.g. "2026-10-09 09:00") is read as local time.
+    function _attrToIsoUtc(v) {
+        if (v === null || v === undefined || v === "") return ""
+        var s = String(v).trim()
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s += "T00:00"   // date-only would otherwise parse as UTC
+        var d = (v instanceof Date) ? v : new Date(s.replace(" ", "T"))
+        return isNaN(d.getTime()) ? "" : d.toISOString()
+    }
+
+    function _fmtLocal(iso) {
+        if (!iso) return "—"
+        var d = new Date(iso)
+        return isNaN(d.getTime()) ? String(iso) : Qt.formatDateTime(d, "dd MMM HH:mm")
+    }
+
+    // "09:09 – 09:22" (today), otherwise with dates; local time
+    function _spanText(fromIso, toIso) {
+        var a = new Date(fromIso), b = new Date(toIso)
+        if (isNaN(a.getTime()) || isNaN(b.getTime())) return "—"
+        var today   = Qt.formatDate(new Date(), "yyyy-MM-dd")
+        var sameDay = Qt.formatDate(a, "yyyy-MM-dd") === Qt.formatDate(b, "yyyy-MM-dd")
+        if (sameDay && Qt.formatDate(a, "yyyy-MM-dd") === today)
+            return Qt.formatTime(a, "HH:mm") + " – " + Qt.formatTime(b, "HH:mm")
+        if (sameDay)
+            return Qt.formatDateTime(a, "dd MMM HH:mm") + " – " + Qt.formatTime(b, "HH:mm")
+        return Qt.formatDateTime(a, "dd MMM HH:mm") + " – " + Qt.formatDateTime(b, "dd MMM HH:mm")
+    }
+
+    function _ageText(fixTime) {
+        if (!fixTime) return "?"
+        var s = Math.max(0, Math.floor((Date.now() - new Date(fixTime).getTime()) / 1000))
+        if (s < 60)    return s + " s"
+        if (s < 3600)  return Math.floor(s / 60) + " min"
+        if (s < 86400) return Math.floor(s / 3600) + " h"
+        return Math.floor(s / 86400) + " d"
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  QFIELDCLOUD GUARD
+    //  Layer writes are queued and only run while QFieldCloud is idle, so we
+    //  never call startEditing()/commitChanges() during a sync, download or
+    //  push (QField 4.x can also auto-push on a timer).
+    //
+    //  Checked against QField source (v3.6 → v4.3.5):
+    //   - objectName "cloudConnection" / "cloudProjectsModel" in the main QML
+    //     (src/app/qml/QgisMobileapp.qml in 4.3; src/qml/qgismobileapp.qml before)
+    //   - QfCloudConnection::ConnectionState { Idle = 0, Busy = 1 }
+    //   - QfCloudProject::ProjectStatus — values shift between versions
+    //     (4.3 added Creating, 4.0 added Pushing), so "Failing" is looked up by
+    //     name; Idle is 0 in every version. Same rule as QField's own
+    //     QfCloudProjectsModel::busyProjectIds(): busy = not Idle and not Failing.
+    //   - iface.findItemByObjectName() is used because QML objects have no
+    //     findChild() method (v0.2's guard silently never fired).
+    //  Non-cloud projects: both lookups come back empty → never busy.
+    // ════════════════════════════════════════════════════════════════════════
+
+    function _cloudBusy() {
         try {
-            // objectName "cloudConnection" confirmed in QField src/qml/qgismobileapp.qml
-            var cc = mainWindow.findChild("cloudConnection")
-            if (cc === null || cc === undefined) return false
-            // QFieldCloudConnection::ConnectionState — src/core/qfieldcloud/qfieldcloudconnection.h
-            //   Idle = 0, Busy = 1
-            // state goes Busy during any cloud network operation (sync, upload, login).
-            // ConnectionStatus (Disconnected/Connecting/LoggedIn) is a separate property
-            // and has no Synchronizing value — state is the correct check.
-            return cc.state === 1   // ConnectionState::Busy
-        } catch(e) { /* not a cloud project or findChild not available in this build */ }
+            var cc = iface.findItemByObjectName("cloudConnection")
+            if (cc && cc.state === 1) return true          // ConnectionState::Busy
+        } catch(e) {}
+        try {
+            var pm = iface.findItemByObjectName("cloudProjectsModel")
+            var cp = pm ? pm.currentProject : null         // QField ≥ 3.6
+            if (cp && cp.status !== undefined) {
+                if (cp.status !== 0 && cp.status !== _cloudFailingStatus()) return true
+            }
+        } catch(e) {}
         return false
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    //  A: LIVE LAYER  — truncated and repopulated with latest fix per device
-    // ════════════════════════════════════════════════════════════════════════
+    function _cloudFailingStatus() {
+        try { return QFieldCloudProject.Failing } catch(e) {}   // legacy name, still registered in 4.3
+        try { return QfCloudProject.Failing } catch(e) {}
+        return -1
+    }
 
-    function _updateLiveLayer(positions, deviceInfo) {
-        if (cfg.liveLayerName === "") return
-        if (_isSyncing()) { mainWindow.displayToast("Live layer skipped — cloud sync in progress"); return }
-        var layers = qgisProject.mapLayersByName(cfg.liveLayerName)
-        if (layers.length === 0) {
-            mainWindow.displayToast("Live layer '" + cfg.liveLayerName + "' not found")
+    function _queueWrite(fn) {
+        var q = plugin.writeQueue.slice()
+        q.push(fn)
+        plugin.writeQueue = q
+        _drainWrites()
+    }
+
+    function _drainWrites() {
+        if (plugin.writeQueue.length === 0) { cloudWaitTimer.stop(); return }
+        if (_cloudBusy()) {
+            if (!cloudWaitTimer.running) {
+                plugin.writeWaitStart = Date.now()
+                cloudWaitTimer.start()
+                mainWindow.displayToast("QFieldCloud is syncing — will save when it finishes")
+            } else if (Date.now() - plugin.writeWaitStart > 10 * 60000) {
+                cloudWaitTimer.stop()
+                plugin.writeQueue = []
+                mainWindow.displayToast("Save cancelled — QFieldCloud still busy after 10 min")
+            }
             return
         }
-        var lyr = layers[0]
-        try {
-            lyr.startEditing()
-            lyr.selectAll()
-            lyr.deleteSelectedFeatures()
-            _writePointsToLayer(lyr, positions, deviceInfo)
-            lyr.commitChanges()
-            lyr.triggerRepaint()
-        } catch(e) {
-            try { lyr.rollBack() } catch(e2) {}
-            mainWindow.displayToast("Live layer error: " + e)
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    //  B: APPEND/HISTORY LAYER  — positions added, never deleted
-    //     forceAppend param kept for Fetch Logs compatibility (always true here)
-    // ════════════════════════════════════════════════════════════════════════
-
-    function _updateAppendLayer(positions, deviceInfo, forceAppend) {
-        if (cfg.appendLayerName === "") return
-        if (_isSyncing()) { mainWindow.displayToast("Accumulated layer skipped — cloud sync in progress"); return }
-        var layers = qgisProject.mapLayersByName(cfg.appendLayerName)
-        if (layers.length === 0) {
-            mainWindow.displayToast("History layer '" + cfg.appendLayerName + "' not found")
-            return
-        }
-        var lyr = layers[0]
-        try {
-            lyr.startEditing()
-            _writePointsToLayer(lyr, positions, deviceInfo)
-            lyr.commitChanges()
-            lyr.triggerRepaint()
-        } catch(e) {
-            try { lyr.rollBack() } catch(e2) {}
-            mainWindow.displayToast("History layer error: " + e)
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    //  B: APPEND/HISTORY LAYER — housekeeping (cull old points)
-    //  Runs after each Live fetch when "Layer B Housekeeping" is enabled:
-    //    cullByCount — keep at most cullMaxPerDevice points per device (newest first)
-    //    cullByAge   — drop points with fix_time older than "now - cullAgeMinutes"
-    //  Both filters use the "fix_time" / "device_id" fields written by
-    //  _writePointsToLayer. Uses the same read-all → clear → rebuild approach
-    //  as _updateLineLayer below, since selecting/deleting individual features
-    //  by id is not reliably available in QField's QML API.
-    // ════════════════════════════════════════════════════════════════════════
-
-    function _cullAppendLayer() {
-        if (cfg.appendLayerName === "") return
-        if (!cfg.cullByCount && !cfg.cullByAge) return
-        if (_isSyncing()) return   // silently skip cull — next fetch will retry
-        var layers = qgisProject.mapLayersByName(cfg.appendLayerName)
-        if (layers.length === 0) return
-        var lyr    = layers[0]
-        var fnames = lyr.fields.names
-        if (fnames.indexOf("fix_time") < 0) return   // nothing to cull/sort on
-
-        try {
-            // ── Phase 1: read every existing feature ──────────────────────
-            lyr.selectAll()
-            var feats = lyr.selectedFeatures ? lyr.selectedFeatures() : []
-            lyr.removeSelection()
-            if (feats.length === 0) return
-
-            var records = []
-            for (var i = 0; i < feats.length; i++) {
-                var f   = feats[i]
-                var rec = { geom: null, attrs: {} }
-                try { rec.geom = f.geometry.asWkt ? f.geometry.asWkt() : null } catch(eg) {}
-                for (var fi = 0; fi < fnames.length; fi++) {
-                    try { rec.attrs[fnames[fi]] = f.attribute(fnames[fi]) } catch(ea) {}
-                }
-                records.push(rec)
-            }
-
-            var keep    = records
-            var removed = 0
-
-            // ── Determine each device's newest record — always protected from ──
-            // ── age-based culling, so every device retains at least one point ──
-            var newestByDev = {}
-            records.forEach(function(r) {
-                var dev = String(r.attrs.device_id)
-                var ft  = String(r.attrs.fix_time || "")
-                if (!newestByDev[dev] || ft > String(newestByDev[dev].attrs.fix_time || ""))
-                    newestByDev[dev] = r
-            })
-            var protectedRecs = Object.keys(newestByDev).map(function(k) { return newestByDev[k] })
-
-            // ── Cull by age ───────────────────────────────────────────────
-            if (cfg.cullByAge && cfg.cullAgeMinutes > 0) {
-                var cutoffIso = new Date(Date.now() - cfg.cullAgeMinutes * 60000).toISOString()
-                var beforeAge = keep.length
-                keep = keep.filter(function(r) {
-                    var ft = String(r.attrs.fix_time || "")
-                    if (ft === "" || ft >= cutoffIso) return true
-                    return protectedRecs.indexOf(r) >= 0   // keep each device's newest point
-                })
-                removed += beforeAge - keep.length
-            }
-
-            // ── Cull by count (per device, newest kept first) ───────────────
-            if (cfg.cullByCount) {
-                var byDev = {}
-                keep.forEach(function(r) {
-                    var dev = String(r.attrs.device_id)
-                    ;(byDev[dev] = byDev[dev] || []).push(r)
-                })
-                var newKeep = []
-                Object.keys(byDev).forEach(function(dev) {
-                    var arr = byDev[dev]
-                    arr.sort(function(a, b) {
-                        var ta = String(a.attrs.fix_time || "")
-                        var tb = String(b.attrs.fix_time || "")
-                        return ta < tb ? 1 : (ta > tb ? -1 : 0)   // newest first
-                    })
-                    if (arr.length > cfg.cullMaxPerDevice) {
-                        removed += arr.length - cfg.cullMaxPerDevice
-                        arr = arr.slice(0, cfg.cullMaxPerDevice)
-                    }
-                    newKeep = newKeep.concat(arr)
-                })
-                keep = newKeep
-            }
-
-            if (removed === 0) return   // nothing to do — leave layer untouched
-
-            // ── Phase 2: clear layer and rebuild with the kept records ───────
-            lyr.startEditing()
-            lyr.selectAll()
-            lyr.deleteSelectedFeatures()
-            keep.forEach(function(r) {
-                if (!r.geom) return
-                var geom = GeometryUtils.createGeometryFromWkt(r.geom)
-                var feat = FeatureUtils.createFeature(lyr, geom)
-                for (var fi = 0; fi < fnames.length; fi++)
-                    feat.setAttribute(fi, r.attrs[fnames[fi]])
-                LayerUtils.addFeature(lyr, feat)
-            })
-            lyr.commitChanges()
-            lyr.triggerRepaint()
-        } catch(e) {
-            try { lyr.rollBack() } catch(e2) {}
-            mainWindow.displayToast("Layer B cull error: " + e)
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    //  LINE TRACK LAYER UPDATE
-    //
-    //  Strategy: read-all → clear-all → rebuild
-    //  This avoids selectByExpression during editing (unreliable in QML).
-    //  Accepts an array of positions which may contain multiple entries per
-    //  device (when fetchHistory is enabled) — all are appended in time order.
-    // ════════════════════════════════════════════════════════════════════════
-
-    function _updateLineLayer(allPositions, deviceInfo) {
-        if (cfg.lineLayerName === "") return
-        if (_isSyncing()) { mainWindow.displayToast("Track layer skipped — cloud sync in progress"); return }
-        var layers = qgisProject.mapLayersByName(cfg.lineLayerName)
-        if (layers.length === 0) {
-            mainWindow.displayToast("Line layer '" + cfg.lineLayerName + "' not found")
-            return
-        }
-        var lyr = layers[0]
-
-        // ── Phase 1: read every existing track WKT ────────────────────────
-        var wktByDevice = {}       // String(deviceId) → WKT of existing line
-        var nameByDevice = {}      // String(deviceId) → device name (for preservation)
-        try {
-            lyr.selectAll()
-            var existing = lyr.selectedFeatures ? lyr.selectedFeatures() : []
-            lyr.removeSelection()
-            for (var fi = 0; fi < existing.length; fi++) {
-                var f = existing[fi]
-                try {
-                    var did = String(f.attribute("device_id"))
-                    if (did && did !== "null" && did !== "undefined") {
-                        var w = ""
-                        try { w = f.geometry.asWkt ? f.geometry.asWkt() : "" } catch(ew) {}
-                        wktByDevice[did]  = w
-                        try { nameByDevice[did] = String(f.attribute("name") || "") } catch(en) {}
-                    }
-                } catch(er) {}
-            }
-        } catch(e) {
-            mainWindow.displayToast("Line read error: " + e); return
-        }
-
-        // ── Phase 2: group new positions by device, sorted by GPS time ────
-        var newByDevice = {}    // String(deviceId) → [{x, y, fixTime}, ...]
-        for (var pi = 0; pi < allPositions.length; pi++) {
-            var pos = allPositions[pi]
-            if (pos.latitude === undefined || pos.longitude === undefined) continue
-            var key = String(pos.deviceId)
-
-            // Reproject to layer CRS
-            var px = pos.longitude, py = pos.latitude
-            try {
-                if (lyr.crs.authid !== "EPSG:4326") {
-                    var wgsCrs = CoordinateReferenceSystemUtils.fromDescription("EPSG:4326")
-                    var rpt    = GeometryUtils.reprojectPoint(
-                        GeometryUtils.point(px, py), wgsCrs, lyr.crs)
-                    px = rpt.x; py = rpt.y
-                }
-            } catch(ep) {}
-
-            if (!newByDevice[key]) newByDevice[key] = []
-            newByDevice[key].push({ x: px, y: py, t: pos.fixTime || "" })
-        }
-        // Sort each device's points chronologically
-        for (var dk in newByDevice) {
-            newByDevice[dk].sort(function(a, b) { return a.t < b.t ? -1 : 1 })
-        }
-
-        // ── Phase 3: clear layer and rebuild ─────────────────────────────
-        try {
-            lyr.startEditing()
-            lyr.selectAll()
-            lyr.deleteSelectedFeatures()
-
-            var processedKeys = {}
-
-            // Devices with new positions — extend existing track or create new
-            for (var nk in newByDevice) {
-                processedKeys[nk] = true
-                var pts   = newByDevice[nk]
-                var info  = deviceInfo[parseInt(nk)] || deviceInfo[nk] || {}
-                var oldWkt = wktByDevice[nk] || ""
-
-                // Build vertex string from new points
-                var newVerts = []
-                for (var vi = 0; vi < pts.length; vi++)
-                    newVerts.push(pts[vi].x + " " + pts[vi].y)
-                var vertStr = newVerts.join(", ")
-
-                var newWkt
-                if (oldWkt.indexOf("LineString") >= 0) {
-                    // Append vertices to end of existing line
-                    newWkt = oldWkt.replace(/\)\s*$/, ", " + vertStr + ")")
-                } else if (newVerts.length >= 2) {
-                    newWkt = "LineString (" + vertStr + ")"
-                } else {
-                    // Single point — degenerate 2-pt placeholder
-                    newWkt = "LineString (" + vertStr + ", " + vertStr + ")"
-                }
-
-                // Sort pts chronologically before passing for start_time/last_update
-                var sortedPts = pts.slice().sort(function(a, b) {
-                    return (a.fixTime || "") < (b.fixTime || "") ? -1 : 1
-                })
-                _writeLineFeature(lyr, newWkt, parseInt(nk) || -1,
-                                  info.name || nameByDevice[nk] || nk,
-                                  sortedPts)
-            }
-
-            // Devices NOT in this fetch — preserve their existing track unchanged
-            // (no new positions so we pass null for timestamps — preserves existing)
-            for (var ek in wktByDevice) {
-                if (processedKeys[ek]) continue
-                var ewkt = wktByDevice[ek]
-                if (!ewkt || ewkt.indexOf("LineString") < 0) continue
-                _writeLineFeature(lyr, ewkt, parseInt(ek) || -1, nameByDevice[ek] || ek, null)
-            }
-
-            lyr.commitChanges()
-            lyr.triggerRepaint()
-        } catch(e) {
-            try { lyr.rollBack() } catch(e2) {}
-            mainWindow.displayToast("Line layer error: " + e)
-        }
-    }
-
-    // Helper: create and add one LineString feature.
-    // Writes device_id, name, start_time, last_update (when those fields exist),
-    // and the optional incident_ref field — matching the QGIS plugin schema.
-    // positions — chronologically sorted array for this device (used for timestamps)
-    function _writeLineFeature(lyr, wkt, deviceId, name, positions) {
-        var geom   = GeometryUtils.createGeometryFromWkt(wkt)
-        var nf     = FeatureUtils.createFeature(lyr, geom)
-        var fnames = lyr.fields.names
-        var _tagText = plugin.fetchTagOverride !== "" ? plugin.fetchTagOverride : cfg.sessionTag
-        var incidentRefValue = (cfg.incidentRefEnabled && cfg.incidentRefField !== ""
-                                && _tagText !== "")
-                               ? _tagText : null
-
-        // Derive start_time / last_update from the positions array when available
-        var startTime  = ""
-        var lastUpdate = ""
-        if (positions && positions.length > 0) {
-            startTime  = String(positions[0].fixTime              || "").substring(0, 19).replace("T", " ")
-            lastUpdate = String(positions[positions.length - 1].fixTime || "").substring(0, 19).replace("T", " ")
-        }
-
-        for (var i = 0; i < fnames.length; i++) {
-            switch (fnames[i]) {
-                case "device_id":   nf.setAttribute(i, deviceId);  break
-                case "name":        nf.setAttribute(i, name);       break
-                case "start_time":  if (startTime  !== "") nf.setAttribute(i, startTime);  break
-                case "last_update": if (lastUpdate !== "") nf.setAttribute(i, lastUpdate); break
-                default:
-                    if (incidentRefValue !== null && fnames[i] === cfg.incidentRefField)
-                        nf.setAttribute(i, incidentRefValue)
-                    break
-            }
-        }
-        LayerUtils.addFeature(lyr, nf)
-    }
-
-    // ── Reproject point to layer CRS and return WKT geometry ─────────────
-    function _geomForLayer(lyr, lon, lat) {
-        if (lyr.crs.authid === "EPSG:4326") {
-            return GeometryUtils.createGeometryFromWkt("POINT(" + lon + " " + lat + ")")
-        }
-        var wgs = CoordinateReferenceSystemUtils.fromDescription("EPSG:4326")
-        var pt  = GeometryUtils.reprojectPoint(GeometryUtils.point(lon, lat), wgs, lyr.crs)
-        return GeometryUtils.createGeometryFromWkt("POINT(" + pt.x + " " + pt.y + ")")
+        cloudWaitTimer.stop()
+        var q = plugin.writeQueue
+        plugin.writeQueue = []
+        for (var i = 0; i < q.length; i++) q[i]()
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -2411,37 +2236,37 @@ Item {
         return out
     }
 
-
     // ════════════════════════════════════════════════════════════════════════
     //  HTTP HELPER
+    //  onError(msg) is optional — without it the message is shown as a toast.
     // ════════════════════════════════════════════════════════════════════════
 
-    function _get(path, callback) {
+    function _get(path, callback, onError) {
+        var fail = function(msg) {
+            if (onError) onError(msg)
+            else         mainWindow.displayToast(msg)
+        }
         var xhr = new XMLHttpRequest()
         var url = cfg.serverUrl + path
         xhr.open("GET", url, true)
         xhr.setRequestHeader("Authorization", "Basic " + _btoa(cfg.username + ":" + cfg.password))
         xhr.setRequestHeader("Accept",        "application/json")
-        xhr.onerror = function() {
-            plugin.fetchBusy = false
-            mainWindow.displayToast("Network error — check URL and connectivity")
-        }
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
             if (xhr.status === 200) {
+                var data
                 try {
-                    callback(JSON.parse(xhr.responseText))
+                    data = JSON.parse(xhr.responseText)
                 } catch(e) {
-                    plugin.fetchBusy = false
-                    mainWindow.displayToast("Parse error: " + e)
+                    fail("Parse error: " + e)
+                    return
                 }
+                callback(data)
             } else if (xhr.status === 0) {
-                plugin.fetchBusy = false
-                mainWindow.displayToast("No response — check server URL")
+                fail("No response — check server URL and connectivity")
             } else {
-                plugin.fetchBusy = false
-                mainWindow.displayToast("HTTP " + xhr.status +
-                    (xhr.status === 401 ? " — wrong username/password" : " on " + path))
+                fail("HTTP " + xhr.status +
+                     (xhr.status === 401 ? " — wrong username/password" : " on " + path.split("?")[0]))
             }
         }
         xhr.send()
