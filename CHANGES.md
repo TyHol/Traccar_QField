@@ -4,6 +4,27 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.4.1 — Bug fixes
+
+- **Tracks rejected by 2D or Z-only line layers.** Lines were always built as LineStringZM; QGIS
+  adds a missing Z / M on commit but never drops one, so saving into a plain 2D line layer (or one
+  with Z but no M) failed with "geometry type is not compatible". Points and lines are now built
+  with exactly the target layer's Z / M (`_layerDims()` reads `wkbType()`); points into a Z layer
+  (e.g. QField's Notes) now carry the fix's altitude instead of 0.
+- **Changing the time window during a load was ignored.** A load still running blocked the new
+  one, and its result then replaced the window you had just picked. Each load now has a
+  generation number; choosing a window always starts a fresh load and late replies are dropped.
+- **Live reply after a window change.** A Live refresh in flight when the window changed could
+  throw on the cleared window; it is now ignored.
+- Saving reports "the layer did not accept …" instead of a silent "Saved 0" when no feature was
+  accepted.
+- **tests/qml/** — runs `main.qml` outside QField (stand-in QField modules, a test driver and a
+  fake Traccar server, using PySide6): 39 checks covering loading, Live, every window type, saving
+  into 2D / Z / M / ZM / reprojected layers, the QFieldCloud wait queue, every dialog and settings
+  page, with zero QML warnings. `python tests/qml/run_tests.py`
+
+---
+
 # v0.4 — One time window, simpler navigation
 
 v0.3 is on branch `v0.3`.
