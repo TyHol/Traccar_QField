@@ -121,3 +121,6 @@ A companion QGIS desktop plugin (Traccar_QGIS) uses the same layers and fields, 
 
 ## Credits
 By [TyHol](https://github.com/TyHol). Uses the [Traccar API](https://www.traccar.org/traccar-api/). Inspired by OPENGIS.ch's [qfield-traccar](https://github.com/opengisch/qfield-traccar) plugin.
+
+## Licence
+Copyright © 2026 TyHol. Released under the [GNU General Public License v2.0 or later](LICENSE) (GPL-2.0-or-later), the same licence as QField and QGIS.

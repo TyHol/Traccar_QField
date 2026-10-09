@@ -3,6 +3,6 @@ name=Traccar Live
 version=0.4.1
 qfieldMinimumVersion=3.3
 author=TyHol
-email=itonyholmes@gmail.com
+email=96470691+TyHol@users.noreply.github.com
 description=Follow Traccar devices on the QField map within a chosen time window, and save their positions and tracks to project layers
 homepage=https://www.traccar.org/traccar-api/

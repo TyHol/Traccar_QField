@@ -10,6 +10,9 @@
  *               every change applies immediately.
  *
  * All layer writes go through _queueWrite(), which waits while QFieldCloud is busy.
+ *
+ * Copyright (C) 2026 TyHol
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 import QtQuick

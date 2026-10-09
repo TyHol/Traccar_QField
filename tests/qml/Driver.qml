@@ -30,7 +30,7 @@ ApplicationWindow {
             signal extentChanged()
             signal rotationChanged()
             signal outputSizeChanged()
-            function coordinateToScreen(pt) { return Qt.point((pt.x + 9.52) * 20000, (52.08 - pt.y) * 20000) }
+            function coordinateToScreen(pt) { return Qt.point((pt.x + 6.35) * 20000, (53.38 - pt.y) * 20000) }
             function setCenter(pt, handleMargins) { lastCenter = pt }
         }
     }
