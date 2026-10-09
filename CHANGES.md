@@ -81,7 +81,8 @@ On first start, v0.2 settings are migrated: B (or A) → points layer, C → tra
 | `pointsLayerName` | "" | Points layer |
 | `pointsPerDevice` | 1 | Fixes per device per save |
 | `tracksLayerName` | "" | Tracks layer |
-| `trackMode` | 0 | 0 = add, 1 = keep most recent per device |
+| `trackMode` | 0 | 0 = add, 1 = keep most recent per device (matched by `device_id`, else by the device name field) |
+| `pointsNameField` / `tracksNameField` | "" | Extra text field that receives the device name (e.g. `title` on QField's built-in Tracks layer). The picker lists only text fields — types are read via QField's `FeatureModel` (Field role) + `LayerUtils.fieldType()`, falling back to all fields if that is unavailable. |
 | `v3Migrated` | false | One-time v0.2 → v0.3 settings migration |
 
 Removed: `intervalMin`, `appendTrack`, `cullByCount`, `cullMaxPerDevice`, `cullByAge`, `cullAgeMinutes`, `fetchMaxPoints`, `fetchLimitPts`, `fetchHistory`, `lastFetchIso`, `incidentRefExpr`, `appendMode`. `liveLayerName`, `appendLayerName`, `lineLayerName`, `pointLayerName` are read once for migration.

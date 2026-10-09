@@ -50,6 +50,8 @@ Item {
         property int    pointsPerDevice: 1      // 1 = latest fix; N = most recent N fixes (last 24 h)
         property string tracksLayerName: ""
         property int    trackMode:       0      // 0 = add a new track per save, 1 = keep most recent only
+        property string pointsNameField: ""     // extra text field to receive the device name ("" = only a 'name' field)
+        property string tracksNameField: ""
 
         // Session tag
         property bool   incidentRefEnabled: false  // write sessionTag into incidentRefField on new features
@@ -122,6 +124,8 @@ Item {
     ListModel { id: ptLayerModel }
     ListModel { id: lnLayerModel }
     ListModel { id: fieldNameModel }    // field names of the points + tracks layers (tag field picker)
+    ListModel { id: ptNameFieldModel }  // text fields of the points layer (device name picker)
+    ListModel { id: lnNameFieldModel }  // text fields of the tracks layer (device name picker)
     ListModel { id: allLayerModel }     // all vector layers (event layer picker in Settings)
     ListModel { id: eventFieldModel }   // fields of the event layer (shared by 3 combos in Settings)
     ListModel { id: eventFeatureModel } // features of the event layer (Save Tracks picker)
@@ -180,6 +184,54 @@ Item {
         if (combo.currentIndex < 0 || model.count === 0) return ""
         var item = model.get(combo.currentIndex)
         return (item && !item.isHeader && item.name !== "— no layer —") ? item.name : ""
+    }
+
+    // ── Text fields of a layer ────────────────────────────────────────────
+    // QML only sees field *names* on a layer (QgsFields exposes no types), so the
+    // types are read through QField's FeatureModel, whose Field role returns the
+    // QgsField (role = Qt.UserRole + 3 in QField 3.3 → 4.3), and LayerUtils.fieldType().
+    // Created at runtime so a QField version without it cannot stop the plugin
+    // loading. Returns {names, filtered}; filtered = false → types unknown, all fields.
+    function _textFieldNames(layerName) {
+        var layers = layerName !== "" ? qgisProject.mapLayersByName(layerName) : []
+        if (layers.length === 0) return { names: [], filtered: true }
+        var lyr   = layers[0]
+        var names = lyr.fields.names
+        var fm    = null
+        try {
+            fm = Qt.createQmlObject("import org.qfield\nFeatureModel {}", plugin, "fieldTypeProbe")
+            fm.currentLayer = lyr
+            var out = []
+            for (var i = 0; i < names.length; i++) {
+                var fld = fm.data(fm.index(i, 0), 0x0100 + 3)   // FeatureModel::Field
+                if (LayerUtils.fieldType(fld) === "QString") out.push(names[i])
+            }
+            fm.destroy()
+            return { names: out, filtered: true }
+        } catch(e) {
+            try { if (fm) fm.destroy() } catch(e2) {}
+        }
+        return { names: names, filtered: false }
+    }
+
+    // ── Device-name field picker model for one layer ──────────────────────
+    function populateNameFields(model, layerName) {
+        model.clear()
+        model.append({ name: "— none (only a field called 'name') —", isHeader: false })
+        if (layerName === "") return
+        var r = _textFieldNames(layerName)
+        if (!r.filtered)
+            model.append({ name: "— field types unknown: all fields shown —", isHeader: true })
+        else if (r.names.length === 0)
+            model.append({ name: "— no text fields in this layer —", isHeader: true })
+        for (var i = 0; i < r.names.length; i++)
+            model.append({ name: r.names[i], isHeader: false })
+    }
+
+    function comboNameField(combo, model) {
+        if (combo.currentIndex <= 0 || model.count === 0) return ""
+        var item = model.get(combo.currentIndex)
+        return (item && !item.isHeader) ? item.name : ""
     }
 
     // ── Field names of the points + tracks layers (tag field picker) ──────
@@ -934,6 +986,12 @@ Item {
             if (tracksLayerCombo.currentIndex < 0) tracksLayerCombo.currentIndex = 0
             trackAddRadio.checked     = cfg.trackMode === 0
             trackReplaceRadio.checked = cfg.trackMode === 1
+            populateNameFields(ptNameFieldModel, cfg.pointsLayerName)
+            restoreSelection(pointsNameCombo, ptNameFieldModel, cfg.pointsNameField)
+            if (pointsNameCombo.currentIndex < 0) pointsNameCombo.currentIndex = 0
+            populateNameFields(lnNameFieldModel, cfg.tracksLayerName)
+            restoreSelection(tracksNameCombo, lnNameFieldModel, cfg.tracksNameField)
+            if (tracksNameCombo.currentIndex < 0) tracksNameCombo.currentIndex = 0
             // Session tag
             incidentRefCheck.checked        = cfg.incidentRefEnabled
             settingsDialog.localUseDisplay  = cfg.useDisplayAsTag
@@ -963,6 +1021,13 @@ Item {
             restoreSelection(incidentRefFieldCombo, fieldNameModel, prev)
         }
 
+        // Re-list text fields after a layer change, keeping the choice if that field still exists
+        function refreshNameFields(combo, model, layerCombo, layerModel, prev) {
+            populateNameFields(model, comboLayerName(layerCombo, layerModel))
+            restoreSelection(combo, model, prev)
+            if (combo.currentIndex < 0) combo.currentIndex = 0
+        }
+
         function saveSettings() {
             cfg.serverUrl   = urlField.text.trim().replace(/\/+$/, "")
             cfg.username    = userField.text.trim()
@@ -979,6 +1044,8 @@ Item {
             cfg.pointsPerDevice = pointsPerDeviceSpin.value
             cfg.tracksLayerName = comboLayerName(tracksLayerCombo, lnLayerModel)
             cfg.trackMode       = trackReplaceRadio.checked ? 1 : 0
+            cfg.pointsNameField = comboNameField(pointsNameCombo, ptNameFieldModel)
+            cfg.tracksNameField = comboNameField(tracksNameCombo, lnNameFieldModel)
             // Session tag
             cfg.incidentRefEnabled  = incidentRefCheck.checked
             cfg.useDisplayAsTag     = settingsDialog.localUseDisplay
@@ -1169,7 +1236,26 @@ Item {
                             }
                             highlighted: pointsLayerCombo.highlightedIndex === index
                         }
-                        onActivated: settingsDialog.refreshTagFields()
+                        onActivated: {
+                            settingsDialog.refreshTagFields()
+                            settingsDialog.refreshNameFields(pointsNameCombo, ptNameFieldModel,
+                                pointsLayerCombo, ptLayerModel, cfg.pointsNameField)
+                        }
+                    }
+                    Label { text: "Write device name into:"; font.pixelSize: 12 }
+                    ComboBox {
+                        id: pointsNameCombo; Layout.fillWidth: true
+                        model: ptNameFieldModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: pointsNameCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: pointsNameCombo.highlightedIndex === index
+                        }
                     }
                     RowLayout {
                         Label { text: "Points per device per save:" }
@@ -1199,7 +1285,26 @@ Item {
                             }
                             highlighted: tracksLayerCombo.highlightedIndex === index
                         }
-                        onActivated: settingsDialog.refreshTagFields()
+                        onActivated: {
+                            settingsDialog.refreshTagFields()
+                            settingsDialog.refreshNameFields(tracksNameCombo, lnNameFieldModel,
+                                tracksLayerCombo, lnLayerModel, cfg.tracksNameField)
+                        }
+                    }
+                    Label { text: "Write device name into:"; font.pixelSize: 12 }
+                    ComboBox {
+                        id: tracksNameCombo; Layout.fillWidth: true
+                        model: lnNameFieldModel; textRole: "name"
+                        delegate: ItemDelegate {
+                            width: tracksNameCombo.width; enabled: !model.isHeader
+                            contentItem: Text {
+                                text: model.name; verticalAlignment: Text.AlignVCenter
+                                color: model.isHeader ? Theme.secondaryTextColor : Theme.mainTextColor
+                                font.pixelSize: model.isHeader ? 10 : 13
+                                leftPadding: model.isHeader ? 4 : 12
+                            }
+                            highlighted: tracksNameCombo.highlightedIndex === index
+                        }
                     }
                     Label { text: "On each save:"; font.pixelSize: 12 }
                     RadioButton {
@@ -1217,8 +1322,9 @@ Item {
                     }
                     Label {
                         visible: trackReplaceRadio.checked
-                        text: "Saving replaces every earlier track of that device in the layer " +
-                              "(needs a device_id field)."
+                        text: "Saving replaces every earlier track of that device in the layer. " +
+                              "Devices are matched by device_id, or by the device name field " +
+                              "if the layer has no device_id."
                         font.pixelSize: 11; color: "#E65100"
                         wrapMode: Text.WordWrap; Layout.fillWidth: true
                     }
@@ -2263,10 +2369,19 @@ Item {
         var lyr = _layerByName(cfg.tracksLayerName, "Tracks")
         if (!lyr) return -1
         var fnames = lyr.fields.names
+        var nameField = _nameFieldFor(fnames, cfg.tracksNameField)
+
+        // "Keep most recent": match earlier tracks by device_id, else by device name
         var replace = cfg.trackMode === 1
-        if (replace && fnames.indexOf("device_id") < 0) {
-            mainWindow.displayToast("Tracks layer has no device_id field — adding instead of replacing")
+        var matchField = fnames.indexOf("device_id") >= 0 ? "device_id" : nameField
+        if (replace && matchField === "") {
+            mainWindow.displayToast("Tracks layer has no device_id or device name field — adding instead of replacing")
             replace = false
+        }
+        var matchKeys = {}   // value in matchField → true, for the devices being saved
+        for (var dk in byDev) {
+            var dl = info.lookup[dk] || info.lookup[parseInt(dk)] || {}
+            matchKeys[matchField === "device_id" ? String(parseInt(dk)) : String(dl.name || dk)] = true
         }
 
         // Collect feature ids of earlier tracks for the devices being saved
@@ -2276,7 +2391,7 @@ Item {
                 var iter = LayerUtils.createFeatureIterator(lyr)
                 while (iter.hasNext()) {
                     var f = iter.next()
-                    if (byDev[String(f.attribute("device_id"))] !== undefined) oldFids.push(f.id)
+                    if (matchKeys[String(f.attribute(matchField))] === true) oldFids.push(f.id)
                 }
                 iter.close()
             } catch(e) {
@@ -2318,6 +2433,7 @@ Item {
                     start_local: _localText(pts[0].fixTime),
                     last_local:  _localText(pts[pts.length - 1].fixTime)
                 }
+                if (nameField !== "") vals[nameField] = vals.name
                 _setAttributes(feat, fnames, vals, info.tag)
                 if (LayerUtils.addFeature(lyr, feat)) written++
             }
@@ -2418,9 +2534,10 @@ Item {
 
     // Returns number of points added
     function _writePointsToLayer(lyr, positions, deviceInfo) {
-        var fnames  = lyr.fields.names
-        var savedAt = new Date().toISOString()
-        var added   = 0
+        var fnames    = lyr.fields.names
+        var nameField = _nameFieldFor(fnames, cfg.pointsNameField)
+        var savedAt   = new Date().toISOString()
+        var added     = 0
         positions.forEach(function(pos) {
             var info  = deviceInfo[pos.deviceId] || {}
             var attrs = pos.attributes || {}
@@ -2442,6 +2559,7 @@ Item {
                 motion:     String(attrs.motion || ""),
                 fetched_at: savedAt
             }
+            if (nameField !== "") vals[nameField] = vals.name
             _setAttributes(feat, fnames, vals, "")
             if (LayerUtils.addFeature(lyr, feat)) added++
         })
@@ -2459,6 +2577,13 @@ Item {
             return null
         }
         return layers[0]
+    }
+
+    // Field that receives the device name: the one picked in Settings if the layer
+    // still has it, else a field called 'name', else "" (name not written)
+    function _nameFieldFor(fnames, chosen) {
+        if (chosen !== "" && fnames.indexOf(chosen) >= 0) return chosen
+        return fnames.indexOf("name") >= 0 ? "name" : ""
     }
 
     // Fill fields by name; tagOverride (feature display value) beats cfg.sessionTag
