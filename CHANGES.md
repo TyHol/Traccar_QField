@@ -4,6 +4,48 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.4 — One time window, simpler navigation
+
+v0.3 is on branch `v0.3`.
+
+## One time window for everything
+- A single **Time window** in the main dialog replaces the v0.3 trail length, the Save Tracks dialog window and the hidden 24 h look-back for "points per device".
+- **What is on the map is what gets saved.** Tracks drawn = every fix inside the window; **〰 Save tracks** writes those lines, **📍 Save positions** writes the markers (latest fix) or every fix in the window.
+- Choices: Last 15 min … Last 3 months (moving), **Custom dates…** and **From feature…** (inline controls + *Show this window*).
+- **Live** keeps a moving window up to date (new fixes appended, old ones dropped). A window that ends in the past cannot change, so Live pauses and markers show each device's last fix in the window. A custom/feature window that runs into the future (or an ongoing feature) keeps updating until its end.
+- **🔄** loads the window once; **Clear** removes everything from the map.
+- Device rows show fixes in the window and their time span, plus speed / battery.
+- Removed: Save Tracks dialog, Fetch & preview step, orange preview overlay, session history list, `trailMinutes`, `pointsPerDevice`.
+
+## Settings: list of short pages
+- Settings opens on a list — **Connection, Layers, Tag, Advanced** — each with a one-line summary and warnings (e.g. "⚠ Nothing to save to yet", "✕ wrong username or password"). Tapping opens that page; ← goes back.
+- **No Save button**: every change applies immediately (text fields when editing finishes, or on ← / ✕).
+- The main dialog opens Settings at the right page: the "Positions → … · Tracks → …" line opens Layers; the error banner and first-run box open Connection.
+- Event-layer setup ("From feature") moved to Advanced; the tag got its own page.
+
+## Small screens
+- Dialogs are full-screen below 520 px wide, inset by QField's `sceneTopMargin` / `sceneBottomMargin` (status / navigation bars); a floating panel on wider screens.
+- Main dialog: time window and controls at the top, Save buttons at the bottom, only the device list scrolls.
+- First-run box ("Getting started") until a server and account are set.
+
+## Help
+- Rewritten for the new layout: Getting started, Time window, Live / 🔄 / Clear, On the map, Saving, Times, Session tag.
+
+## cfg Properties (v0.4)
+
+| Property | Default | Purpose |
+|---|---|---|
+| `windowMinutes` | 60 | > 0 = Last N minutes, -1 = custom dates, -2 = from feature |
+| `customFrom` / `customTo` | "" | Custom window, local "YYYY-MM-DD HH:MM" |
+| `eventFeatureFid` | -1 | Feature chosen for "From feature" |
+| `featureSpan` / `featureDuration` | 0 / 120 | start→end, start + duration, end − duration (minutes) |
+| `pointsMode` | 0 | 0 = latest fix per device, 1 = every fix in the window |
+| `v4Migrated` | false | One-time v0.3 → v0.4 migration (`trailMinutes` → `windowMinutes`, `pointsPerDevice > 1` → `pointsMode = 1`) |
+
+Unchanged: connection, overlay toggles, layer / name-field / track-mode, tag and event-layer settings.
+
+---
+
 # v0.3 — Live overlay + on-demand saving
 
 v0.2 is preserved as git tag `v0.2-backup` and in `backup/main_v0.2.qml`.
