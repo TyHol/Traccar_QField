@@ -190,7 +190,7 @@ ApplicationWindow {
         },
         function() {
             check("wrong password → clear error", plugin.liveError.indexOf("401") >= 0 && plugin.win === null, plugin.liveError)
-            cfg.username = "test@example.com"; cfg.password = "secret"
+            cfg.username = "test@example.com"; cfg.password = "secret"   // pragma: allowlist secret (fake server)
             plugin.reloadWindow()
             waitFor("load last 3 h", function() { return !plugin.loading })
         },

@@ -38,7 +38,7 @@ MAIN = os.environ.get("TRACCAR_MAIN_QML") or os.path.abspath(os.path.join(HERE, 
 
 # ── Fake Traccar server ──────────────────────────────────────────────────────
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
-USER, PWD = "test@example.com", "secret"
+USER, PWD = "test@example.com", "secret"  # pragma: allowlist secret  (fake server)
 DEVICES = [{"id": 1, "name": "Phone A", "status": "online"},
            {"id": 2, "name": "Van 3", "status": "offline"},
            {"id": 3, "name": "Spare", "status": "unknown"}]
@@ -63,7 +63,7 @@ def _p(s):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
+    def log_message(self, *_args):
         pass
 
     def _send(self, code, body=None):
@@ -80,7 +80,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/test/addfix":                    # test hook: a new live fix
             d = int(q["dev"][0])
             n = len(POS[d])
-            POS[d].append(_fix(d, datetime.now(timezone.utc) - timedelta(seconds=1), -6.31, 53.365, 1000 + n))
+            last = _p(POS[d][-1]["fixTime"]) if POS[d] else NOW
+            t = max(datetime.now(timezone.utc) - timedelta(seconds=1), last + timedelta(seconds=1))
+            POS[d].append(_fix(d, t, -6.31, 53.365, 1000 + n))
             return self._send(200, {})
         auth = "Basic " + base64.b64encode(("%s:%s" % (USER, PWD)).encode()).decode()
         if self.headers.get("Authorization", "") != auth:
