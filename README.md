@@ -117,7 +117,7 @@ The password is stored in QField's settings on the device, like other plugin set
   ```
 - A plugin release zip contains `main.qml`, `metadata.txt` and `traccar_icon.svg` at its root.
 
-A companion QGIS desktop plugin (Traccar_QGIS) uses the same layers and fields, so one GeoPackage works in both.
+A companion QGIS desktop plugin, [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS), uses the same layers and fields, so one GeoPackage works in both.
 
 ## Credits
 By [TyHol](https://github.com/TyHol). Uses the [Traccar API](https://www.traccar.org/traccar-api/). Inspired by OPENGIS.ch's [qfield-traccar](https://github.com/opengisch/qfield-traccar) plugin.
