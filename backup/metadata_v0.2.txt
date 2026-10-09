@@ -1,8 +1,8 @@
 [general]
 name=Traccar Live
-version=0.3.0
+version=0.2.0
 qfieldMinimumVersion=3.3
 author=TyHol
 email=itonyholmes@gmail.com
-description=Live Traccar device overlay (markers + trails) with on-demand saving of positions and tracks to project layers
+description=Fetch live Traccar device positions into the current project layer
 homepage=https://www.traccar.org/traccar-api/
