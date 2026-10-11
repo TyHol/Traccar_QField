@@ -15,6 +15,8 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   visible; the device list scrolls with a visible scrollbar, and device rows are more compact.
 - **Show button on the map** is also in Settings → Advanced.
 - The settings button is a cog; the "Long window — loading and drawing may be slow" note is gone.
+- Dialog headers use QField's green (`Theme.mainColor`) with rounded top corners; the Markers /
+  Labels / Tracks / Accuracy checkboxes are smaller.
 - **Icons instead of emoji** — some devices have no emoji font, so buttons showed blanks. Header,
   Live / Stop, refresh, zoom-to, copy and Save buttons now use SVG icons from `icons/`; emoji in
   status text and help were replaced with words. The release zip must include the `icons/` folder.
