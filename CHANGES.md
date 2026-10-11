@@ -11,8 +11,10 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   running and the same screen has an **Open Traccar Live** button.
 - **Copy a device's position** — each device row shows its latest fix as lat/long (WGS84, 6 decimals)
   with a copy-to-clipboard button.
-- **Shorter main screen** — about 30% shorter so the map stays visible; the device list scrolls with
-  a visible scrollbar.
+- **Smaller main and settings screens** — about 30% shorter and 7% narrower so the map stays
+  visible; the device list scrolls with a visible scrollbar, and device rows are more compact.
+- **Show button on the map** is also in Settings → Advanced.
+- The settings button is a cog; the "Long window — loading and drawing may be slow" note is gone.
 - **Icons instead of emoji** — some devices have no emoji font, so buttons showed blanks. Header,
   Live / Stop, refresh, zoom-to, copy and Save buttons now use SVG icons from `icons/`; emoji in
   status text and help were replaced with words. The release zip must include the `icons/` folder.

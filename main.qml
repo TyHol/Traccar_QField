@@ -175,6 +175,24 @@ Item {
         color: Theme.secondaryTextColor
     }
 
+    // ── Compact checkbox for the "what to show" row ───────────────────────
+    component ShowBox: CheckBox {
+        topPadding:    2
+        bottomPadding: 2
+        topInset:      0
+        bottomInset:   0
+    }
+
+    // ── Small icon button in the device list ──────────────────────────────
+    component RowButton: ToolButton {
+        implicitWidth:  34
+        implicitHeight: 34
+        padding:        6
+        icon.width:     18
+        icon.height:    18
+        background:     Item {}
+    }
+
     // ── White icon button on the blue dialog headers ──────────────────────
     component HeaderButton: ToolButton {
         icon.color:  "white"
@@ -735,7 +753,7 @@ Item {
         visible: false
         modal:   true
         padding: 8
-        width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
+        width:   plugin.phone ? mainWindow.width * 0.93 : Math.min(mainWindow.width * 0.84, 428)
         // ~70% of the available height, so the map stays visible around it
         height:  plugin.phone ? (mainWindow.height - plugin.topInset - plugin.bottomInset) * 0.7
                               : Math.min(mainWindow.height * 0.63, 550)
@@ -940,10 +958,10 @@ Item {
             Flow {
                 Layout.fillWidth: true
                 spacing: 0
-                CheckBox { text: "Markers";  checked: cfg.showMarkers;  onToggled: cfg.showMarkers  = checked }
-                CheckBox { text: "Labels";   checked: cfg.showLabels;   onToggled: cfg.showLabels   = checked }
-                CheckBox { text: "Tracks";   checked: cfg.showTrails;   onToggled: cfg.showTrails   = checked }
-                CheckBox { text: "Accuracy"; checked: cfg.showAccuracy; onToggled: cfg.showAccuracy = checked }
+                ShowBox { text: "Markers";  checked: cfg.showMarkers;  onToggled: cfg.showMarkers  = checked }
+                ShowBox { text: "Labels";   checked: cfg.showLabels;   onToggled: cfg.showLabels   = checked }
+                ShowBox { text: "Tracks";   checked: cfg.showTrails;   onToggled: cfg.showTrails   = checked }
+                ShowBox { text: "Accuracy"; checked: cfg.showAccuracy; onToggled: cfg.showAccuracy = checked }
             }
 
             // ── Devices ───────────────────────────────────────────────────
@@ -967,7 +985,7 @@ Item {
 
                 delegate: Rectangle {
                     width:  ListView.view.width
-                    height: 68
+                    height: 56
                     color:  index % 2 === 0 ? "#F5F5F5" : "white"
                     property var row: modelData
 
@@ -1004,23 +1022,17 @@ Item {
                                 Layout.fillWidth: true
                             }
                         }
-                        ToolButton {
+                        RowButton {
                             visible: row.pos !== null
                             icon.source: "icons/copy.svg"
-                            icon.width:  20
-                            icon.height: 20
-                            background:  Item {}
                             onClicked: {
                                 copyToClipboard(_latLonText(row.pos))
                                 mainWindow.displayToast(row.name + ": " + _latLonText(row.pos) + " copied")
                             }
                         }
-                        ToolButton {
+                        RowButton {
                             visible: row.pos !== null
                             icon.source: "icons/locate.svg"
-                            icon.width:  22
-                            icon.height: 22
-                            background:  Item {}
                             onClicked: { zoomToDevice(row.pos); mainDialog.close() }
                         }
                     }
@@ -1232,11 +1244,12 @@ Item {
         visible: false
         modal:   true
         padding: 10
-        width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
-        height:  plugin.phone ? mainWindow.height - plugin.topInset - plugin.bottomInset
-                              : Math.min(mainWindow.height * 0.9, 780)
+        width:   plugin.phone ? mainWindow.width * 0.93 : Math.min(mainWindow.width * 0.84, 428)
+        height:  plugin.phone ? (mainWindow.height - plugin.topInset - plugin.bottomInset) * 0.7
+                              : Math.min(mainWindow.height * 0.63, 550)
         x:       (mainWindow.width - width) / 2
-        y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
+        y:       plugin.phone ? plugin.topInset + (mainWindow.height - plugin.topInset - plugin.bottomInset - height) / 2
+                              : (mainWindow.height - height) / 2
 
         property string page: ""   // "" = list, "connection", "layers", "tag", "advanced"
 
@@ -1385,7 +1398,8 @@ Item {
                     SettingsRow {
                         title:   "Advanced"
                         onClicked: settingsDialog.page = "advanced"
-                        summary: "Refresh every " + cfg.liveIntervalSec + " s  ·  grey after "
+                        summary: (cfg.showButton ? "" : "Map button hidden  ·  ")
+                                 + "Refresh every " + cfg.liveIntervalSec + " s  ·  grey after "
                                  + cfg.staleMinutes + " min\nFrom feature: "
                                  + (cfg.eventLayerName !== "" ? cfg.eventLayerName : "not set up")
                     }
@@ -1574,6 +1588,16 @@ Item {
                     Layout.fillWidth: true
                     spacing: 4
 
+                    Label { text: "Map button"; font.bold: true; font.pixelSize: 15 }
+                    Switch {
+                        text:    "Show button on the map"
+                        checked: cfg.showButton
+                        onToggled: cfg.showButton = checked
+                        Layout.fillWidth: true
+                    }
+                    Hint { text: "When hidden, open Traccar Live from QField's Plugins list: tap the settings icon next to Traccar Live." }
+
+                    Item { height: 8 }
                     Label { text: "Live"; font.bold: true; font.pixelSize: 15 }
                     RowLayout {
                         Label { text: "Refresh every"; Layout.fillWidth: true }
@@ -1693,14 +1717,12 @@ Item {
         if (w === null) {
             return cfg.liveOn ? "Loading…" : "Tap Live to follow devices, or Refresh to load this window once."
         }
-        var spanMs = new Date(w.toIso).getTime() - new Date(w.fromIso).getTime()
-        var big    = spanMs > 7 * 86400000 ? "\nLong window — loading and drawing may be slow." : ""
         if (w.trimMinutes > 0)
-            return _spanText(w.fromIso, w.toIso) + "  ·  " + (cfg.liveOn ? "updating live" : "Live is off") + big
+            return _spanText(w.fromIso, w.toIso) + "  ·  " + (cfg.liveOn ? "updating live" : "Live is off")
         if (w.moving)
             return _spanText(w.fromIso, w.toIso) + " (still running)  ·  "
-                   + (cfg.liveOn ? "updating live" : "Live is off") + big
-        return _spanText(w.fromIso, w.toIso) + "  ·  past window" + (cfg.liveOn ? " — Live paused" : "") + big
+                   + (cfg.liveOn ? "updating live" : "Live is off")
+        return _spanText(w.fromIso, w.toIso) + "  ·  past window" + (cfg.liveOn ? " — Live paused" : "")
     }
 
     // ── Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" text into a local Date ─────
