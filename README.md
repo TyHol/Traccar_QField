@@ -13,7 +13,7 @@ Latest release: **[v0.5](https://github.com/TyHol/Traccar_QField/releases/latest
 ---
 
 ## Install
-<img width="150" height="150" alt="QR code for the v0.5 install link" src="install_qr_v0.5.png" />
+<img width="150" height="150" alt="QR code for the v0.5 install link" src="install_qr_traccar_qfield-v0.5.png" />
 
 **From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
