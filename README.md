@@ -4,11 +4,11 @@ A [QField](https://qfield.org) plugin that shows your [Traccar](https://www.trac
 
 - **One time window for everything** — *Last 15 minutes … Last 3 months*, custom dates, or the start/end of a feature such as an incident. The tracks on the map are the fixes inside the window, and the Save buttons save exactly that.
 - **Live map overlay** — markers, name labels, GPS-accuracy circles and tracks, refreshed every few seconds. Nothing is written to your project until you tap Save.
-- **Two layers, saved on demand** — 📍 positions and 〰 tracks, into any point / line layers you choose.
+- **Two layers, saved on demand** — positions and tracks, into any point / line layers you choose.
 - **QFieldCloud-safe** — saves wait while a cloud sync is running, then go ahead.
 - **Local time everywhere** on screen, including summer time; stored in UTC.
 
-Latest release: **[v0.4.1](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
+Latest release: **[v0.5](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
 
 ---
 
@@ -18,19 +18,21 @@ Latest release: **[v0.4.1](https://github.com/TyHol/Traccar_QField/releases/late
 **From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
 ```
-https://github.com/TyHol/Traccar_QField/releases/download/v0.4.1/Traccar_Qfieldv0.4.1.zip
+https://github.com/TyHol/Traccar_QField/releases/download/v0.5/Traccar_Qfieldv0.5.zip
 ```
 
-**From a file** — download `Traccar_Qfieldv0.4.1.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
+**From a file** — download `Traccar_Qfieldv0.5.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
 
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 
 ## Getting started
 
 1. Tap the **Traccar** button on the QField toolbar.
-2. **🔧 → Connection** — enter the server address (the one you open in a browser), your Traccar email / username and password, and tap *Test connection*.
-3. Pick a **Time window** and tap **▶ Live** to follow devices, or **🔄** to load the window once.
-4. To keep what you see, choose layers in **🔧 → Layers** and use **📍 Save positions** / **〰 Save tracks**.
+2. **Settings (spanner) → Connection** — enter the server address (the one you open in a browser), your Traccar email / username and password, and tap *Test connection*.
+3. Pick a **Time window** and tap **Live** to follow devices, or **Refresh** to load the window once.
+4. To keep what you see, choose layers in **Settings (spanner) → Layers** and use **Save positions** / **Save tracks**.
+
+To hide the Traccar button from the map, open QField's **Plugins** list, tap the settings icon next to *Traccar Live* and turn off **Show icon on canvas**. Live tracking keeps running, and the same screen has an **Open Traccar Live** button.
 
 Not sure which layers to use? Add the two layers from [`traccar_template.gpkg`](traccar_template.gpkg) (also attached to each release) to your QGIS project — they have every field the plugin fills.
 
@@ -41,23 +43,23 @@ Not sure which layers to use? Add the two layers from [`traccar_template.gpkg`](
 |---|---|
 | Last 15 min … Last 3 months | Follows the current time. With Live on, new fixes are added and old ones drop off. |
 | Custom dates… | From / To in local time (`YYYY-MM-DD HH:MM`), then *Show this window*. |
-| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in 🔧 → Advanced. |
+| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in Settings (spanner) → Advanced. |
 
 Each device in the list shows how many fixes it has in the window and their time span. A window that ends in the past cannot change, so Live pauses for it and the markers show each device's last fix in that window.
 
 ### Main screen
-- **▶ Live / ⏹ Stop live** — refresh every few seconds (10 s by default).
-- **🔄** — load the window once. **Clear** — stop Live and remove everything from the map.
+- **Live / Stop live** — refresh every few seconds (10 s by default).
+- **Refresh** — load the window once. **Clear** — stop Live and remove everything from the map.
 - **Show** — switch Markers, Labels, Tracks and Accuracy circles on or off.
-- **Devices** — ⌖ centres the map on that device. Markers are blue when the last fix is recent and grey when it is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
-- **📍 Save positions** / **〰 Save tracks** — the line underneath shows where they go; tap it to change.
+- **Devices** — each row shows the latest position as lat/long; the copy button copies it to the clipboard and the target button centres the map on that device. Markers are blue when the last fix is recent and grey when it is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
+- **Save positions** / **Save tracks** — the line underneath shows where they go; tap it to change.
 
 ### Saving
-| Button | Option (🔧 → Layers) | Adds |
+| Button | Option (Settings (spanner) → Layers) | Adds |
 |---|---|---|
-| 📍 Save positions | *Latest fix per device* | one point per device |
+| Save positions | *Latest fix per device* | one point per device |
 | | *Every fix in the time window* | one point per fix |
-| 〰 Save tracks | *Add a new track each save* | one line per device |
+| Save tracks | *Add a new track each save* | one line per device |
 | | *Keep only the most recent track* | replaces that device's earlier track (matched by `device_id`, or by the device-name field if there is no `device_id`) |
 
 Tracks carry altitude as Z and the fix time as M when the layer has them; plain 2D layers work too.
@@ -77,7 +79,7 @@ Fields are filled **by name** — whichever of these your layer has; others are 
 | `battery`, `motion`, `address` | from the device | `saved_at` | when you saved |
 | `fetched_at` | when you saved | | |
 
-Two extras in **🔧 → Layers / Tag**:
+Two extras in **Settings (spanner) → Layers / Tag**:
 - **Device name goes into** — also write the device name into another text field, e.g. `title` on QField's built-in layers (only text fields are offered).
 - **Tag** — stamp a text such as `FIRE-2026-001` into a field of your choice on everything you save. With *From feature*, the feature's display value can be used as the tag instead.
 
@@ -102,7 +104,7 @@ The password is stored in QField's settings on the device, like other plugin set
 ## Troubleshooting
 | Message | What to check |
 |---|---|
-| *HTTP 401 — wrong username/password* | 🔧 → Connection; use the same login as the Traccar web page. |
+| *HTTP 401 — wrong username/password* | Settings (spanner) → Connection; use the same login as the Traccar web page. |
 | *No response — check server URL* | The address (including `https://`) and the phone's connection. |
 | *No fixes in this window* | The device list shows each device's fixes and span — pick a longer window or check the device's clock. |
 | *… layer did not accept …* | The layer must be editable and of the right type (points for positions, lines for tracks). |

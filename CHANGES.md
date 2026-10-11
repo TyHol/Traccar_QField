@@ -4,6 +4,21 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.5 — Hide the map button, copy positions, icons that always show
+
+- **Show icon on canvas** — the plugin now has a settings icon in QField's Plugins list
+  (`configure()`). Turning the switch off hides the Traccar button from the map; Live tracking keeps
+  running and the same screen has an **Open Traccar Live** button.
+- **Copy a device's position** — each device row shows its latest fix as lat/long (WGS84, 6 decimals)
+  with a copy-to-clipboard button.
+- **Shorter main screen** — about 30% shorter so the map stays visible; the device list scrolls with
+  a visible scrollbar.
+- **Icons instead of emoji** — some devices have no emoji font, so buttons showed blanks. Header,
+  Live / Stop, refresh, zoom-to, copy and Save buttons now use SVG icons from `icons/`; emoji in
+  status text and help were replaced with words. The release zip must include the `icons/` folder.
+
+---
+
 # v0.4.1 — Bug fixes
 
 - **Tracks rejected by 2D or Z-only line layers.** Lines were always built as LineStringZM; QGIS
