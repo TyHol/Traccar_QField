@@ -15,7 +15,7 @@ Latest release: **[v0.4.1](https://github.com/TyHol/Traccar_QField/releases/late
 ## Install
 
 **From a link (easiest)** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
-<img width="100" height="100" alt="image" src="https://github.com/user-attachments/assets/50cf539a-d629-4e93-a598-26de60b591b0" 
+
 ```
 https://github.com/TyHol/Traccar_QField/releases/download/v0.4.1/Traccar_Qfieldv0.4.1.zip
 ```
