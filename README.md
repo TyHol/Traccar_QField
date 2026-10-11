@@ -18,10 +18,12 @@ Latest release: **[v0.5](https://github.com/TyHol/Traccar_QField/releases/latest
 **From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
 ```
-https://github.com/TyHol/Traccar_QField/releases/download/v0.5/Traccar_Qfieldv0.5.zip
+https://github.com/TyHol/Traccar_QField/releases/download/v0.5/traccar_qfield-v0.5.zip
 ```
 
-**From a file** — download `Traccar_Qfieldv0.5.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
+**From a file** — download `traccar_qfield-v0.5.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
+
+**Upgrading from v0.4.1 or earlier, installed from a link?** Older zips were named without a hyphen, so QField kept each version as a separate plugin. Uninstall the old *Traccar Live* in QField's Plugins list, then install v0.5. From v0.5 on, new versions replace the installed one.
 
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 
@@ -119,6 +121,7 @@ The password is stored in QField's settings on the device, like other plugin set
   python tests/qml/run_tests.py
   ```
 - A plugin release zip contains `main.qml`, `metadata.txt`, `traccar_icon.svg` and the `icons/` folder at its root.
+- Name the zip `traccar_qfield-vX.Y.zip` (hyphen before the version). QField names the install folder after the zip and only strips a `-vX.Y` suffix, so any other name installs each version as a separate plugin instead of updating it.
 
 A companion QGIS desktop plugin, [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS), uses the same layers and fields, so one GeoPackage works in both.
 

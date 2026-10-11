@@ -16,6 +16,9 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 - **Icons instead of emoji** — some devices have no emoji font, so buttons showed blanks. Header,
   Live / Stop, refresh, zoom-to, copy and Save buttons now use SVG icons from `icons/`; emoji in
   status text and help were replaced with words. The release zip must include the `icons/` folder.
+- **Release zip renamed to `traccar_qfield-v0.5.zip`.** QField only strips a `-vX.Y` suffix when it
+  names the install folder, so `Traccar_Qfieldv0.4.1.zip` and `Traccar_Qfieldv0.5.zip` installed as two
+  separate plugins. Uninstall an older URL install once; later versions update in place.
 
 ---
 
