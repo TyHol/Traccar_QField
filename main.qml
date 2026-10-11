@@ -175,12 +175,36 @@ Item {
         color: Theme.secondaryTextColor
     }
 
+    // ── Dialog frame: rounded corners, green header with rounded top ──────
+    readonly property real cornerRadius: 12
+
+    component DialogBackground: Rectangle {
+        color:  Theme.mainBackgroundColor
+        radius: plugin.cornerRadius
+    }
+
+    component HeaderBar: ToolBar {
+        background: Rectangle {
+            color:  Theme.mainColor
+            radius: plugin.cornerRadius
+            // square off the bottom corners
+            Rectangle {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                height: parent.radius
+                color:  parent.color
+            }
+        }
+    }
+
     // ── Compact checkbox for the "what to show" row ───────────────────────
     component ShowBox: CheckBox {
-        topPadding:    2
-        bottomPadding: 2
-        topInset:      0
-        bottomInset:   0
+        topPadding:      2
+        bottomPadding:   2
+        topInset:        0
+        bottomInset:     0
+        spacing:         4
+        font.pixelSize:  13
+        indicator.scale: 0.8
     }
 
     // ── Small icon button in the device list ──────────────────────────────
@@ -502,6 +526,7 @@ Item {
 
     Dialog {
         id:      pluginOptionsDialog
+        background: DialogBackground {}
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
@@ -510,8 +535,7 @@ Item {
         x:       (mainWindow.width - width) / 2
         y:       (mainWindow.height - height) / 2
 
-        header: ToolBar {
-            background: Rectangle { color: "#1565C0" }
+        header: HeaderBar {
             RowLayout {
                 anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
                 Label {
@@ -749,6 +773,7 @@ Item {
 
     Dialog {
         id:      mainDialog
+        background: DialogBackground {}
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
@@ -761,8 +786,7 @@ Item {
         y:       plugin.phone ? plugin.topInset + (mainWindow.height - plugin.topInset - plugin.bottomInset - height) / 2
                               : (mainWindow.height - height) / 2
 
-        header: ToolBar {
-            background: Rectangle { color: "#1565C0" }
+        header: HeaderBar {
             RowLayout {
                 anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
                 Label {
@@ -1118,6 +1142,7 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
     Dialog {
         id:      helpDialog
+        background: DialogBackground {}
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
@@ -1128,8 +1153,7 @@ Item {
         x:       (mainWindow.width - width) / 2
         y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
 
-        header: ToolBar {
-            background: Rectangle { color: "#1565C0" }
+        header: HeaderBar {
             RowLayout {
                 anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
                 HeaderButton {
@@ -1240,6 +1264,7 @@ Item {
 
     Dialog {
         id:      settingsDialog
+        background: DialogBackground {}
         parent:  mainWindow.contentItem
         visible: false
         modal:   true
@@ -1256,8 +1281,7 @@ Item {
         readonly property var titles: ({ "": "Settings", "connection": "Connection",
                                          "layers": "Layers", "tag": "Tag", "advanced": "Advanced" })
 
-        header: ToolBar {
-            background: Rectangle { color: "#1565C0" }
+        header: HeaderBar {
             RowLayout {
                 anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
                 HeaderButton {
