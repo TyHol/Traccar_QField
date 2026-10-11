@@ -13,8 +13,9 @@ Latest release: **[v0.4.1](https://github.com/TyHol/Traccar_QField/releases/late
 ---
 
 ## Install
+<img width="100" height="100" alt="image" src="https://github.com/user-attachments/assets/50cf539a-d629-4e93-a598-26de60b591b0" />
 
-**From a link (easiest)** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
+**From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
 ```
 https://github.com/TyHol/Traccar_QField/releases/download/v0.4.1/Traccar_Qfieldv0.4.1.zip
@@ -120,7 +121,7 @@ The password is stored in QField's settings on the device, like other plugin set
 A companion QGIS desktop plugin, [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS), uses the same layers and fields, so one GeoPackage works in both.
 
 ## Credits
-By [TyHol](https://github.com/TyHol). Uses the [Traccar API](https://www.traccar.org/traccar-api/). Inspired by OPENGIS.ch's [qfield-traccar](https://github.com/opengisch/qfield-traccar) plugin.
+By [TyHol](https://github.com/TyHol). Uses the [Traccar API](https://www.traccar.org/traccar-api/). Overlay feature inspired by OPENGIS.ch's [qfield-traccar](https://github.com/opengisch/qfield-traccar) plugin.
 
 ## Licence
 Copyright © 2026 TyHol. Released under the [GNU General Public License v2.0 or later](LICENSE) (GPL-2.0-or-later), the same licence as QField and QGIS.
