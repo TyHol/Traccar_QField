@@ -30,11 +30,11 @@ Requires a Traccar account (your own server or e.g. `https://server.traccar.org`
 ## Getting started
 
 1. Tap the **Traccar** button on the QField toolbar.
-2. **Settings (spanner) → Connection** — enter the server address (the one you open in a browser), your Traccar email / username and password, and tap *Test connection*.
+2. **Settings (cog) → Connection** — enter the server address (the one you open in a browser), your Traccar email / username and password, and tap *Test connection*.
 3. Pick a **Time window** and tap **Live** to follow devices, or **Refresh** to load the window once.
-4. To keep what you see, choose layers in **Settings (spanner) → Layers** and use **Save positions** / **Save tracks**.
+4. To keep what you see, choose layers in **Settings (cog) → Layers** and use **Save positions** / **Save tracks**.
 
-To hide the Traccar button from the map, open QField's **Plugins** list, tap the settings icon next to *Traccar Live* and turn off **Show icon on canvas**. Live tracking keeps running, and the same screen has an **Open Traccar Live** button.
+To hide the Traccar button from the map, turn off **Show button on the map** in **Settings (cog) → Advanced**, or tap the settings icon next to *Traccar Live* in QField's **Plugins** list and turn off **Show icon on canvas**. Live tracking keeps running. With the button hidden, open the plugin from that Plugins-list screen: it has an **Open Traccar Live** button.
 
 Not sure which layers to use? Add the two layers from [`traccar_template.gpkg`](traccar_template.gpkg) (also attached to each release) to your QGIS project — they have every field the plugin fills.
 
@@ -45,7 +45,7 @@ Not sure which layers to use? Add the two layers from [`traccar_template.gpkg`](
 |---|---|
 | Last 15 min … Last 3 months | Follows the current time. With Live on, new fixes are added and old ones drop off. |
 | Custom dates… | From / To in local time (`YYYY-MM-DD HH:MM`), then *Show this window*. |
-| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in Settings (spanner) → Advanced. |
+| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in Settings (cog) → Advanced. |
 
 Each device in the list shows how many fixes it has in the window and their time span. A window that ends in the past cannot change, so Live pauses for it and the markers show each device's last fix in that window.
 
@@ -57,7 +57,7 @@ Each device in the list shows how many fixes it has in the window and their time
 - **Save positions** / **Save tracks** — the line underneath shows where they go; tap it to change.
 
 ### Saving
-| Button | Option (Settings (spanner) → Layers) | Adds |
+| Button | Option (Settings (cog) → Layers) | Adds |
 |---|---|---|
 | Save positions | *Latest fix per device* | one point per device |
 | | *Every fix in the time window* | one point per fix |
@@ -81,7 +81,7 @@ Fields are filled **by name** — whichever of these your layer has; others are 
 | `battery`, `motion`, `address` | from the device | `saved_at` | when you saved |
 | `fetched_at` | when you saved | | |
 
-Two extras in **Settings (spanner) → Layers / Tag**:
+Two extras in **Settings (cog) → Layers / Tag**:
 - **Device name goes into** — also write the device name into another text field, e.g. `title` on QField's built-in layers (only text fields are offered).
 - **Tag** — stamp a text such as `FIRE-2026-001` into a field of your choice on everything you save. With *From feature*, the feature's display value can be used as the tag instead.
 
@@ -106,7 +106,7 @@ The password is stored in QField's settings on the device, like other plugin set
 ## Troubleshooting
 | Message | What to check |
 |---|---|
-| *HTTP 401 — wrong username/password* | Settings (spanner) → Connection; use the same login as the Traccar web page. |
+| *HTTP 401 — wrong username/password* | Settings (cog) → Connection; use the same login as the Traccar web page. |
 | *No response — check server URL* | The address (including `https://`) and the phone's connection. |
 | *No fixes in this window* | The device list shows each device's fixes and span — pick a longer window or check the device's clock. |
 | *… layer did not accept …* | The layer must be editable and of the right type (points for positions, lines for tracks). |
