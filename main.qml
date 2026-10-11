@@ -61,6 +61,7 @@ Item {
         property bool   showLabels:      true
         property bool   showAccuracy:    false
         property bool   showTrails:      true   // "Tracks" toggle
+        property bool   showButton:      true   // toolbar button on the map canvas
 
         // Layers (written only on Save)
         property string pointsLayerName: ""
@@ -172,6 +173,14 @@ Item {
         wrapMode: Text.WordWrap
         font.pixelSize: 12
         color: Theme.secondaryTextColor
+    }
+
+    // ── White icon button on the blue dialog headers ──────────────────────
+    component HeaderButton: ToolButton {
+        icon.color:  "white"
+        icon.width:  22
+        icon.height: 22
+        background:  Item {}
     }
 
     // ── Row on the Settings list page ─────────────────────────────────────
@@ -362,7 +371,7 @@ Item {
     function populateEventFeatures() {
         eventFeatureModel.clear()
         if (cfg.eventLayerName === "") {
-            eventFeatureModel.append({ label: "— set up in 🔧 Settings → Advanced —",
+            eventFeatureModel.append({ label: "— set up in Settings → Advanced —",
                                        startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
@@ -464,7 +473,64 @@ Item {
         bgcolor:    Theme.mainColor
         round:      true
         iconSource: "traccar_icon.svg"
+        visible:    cfg.showButton
         onClicked:  mainDialog.open()
+    }
+
+    // ── Plugin manager settings (QField shows a ⚙ icon when this exists) ──
+    function configure() {
+        pluginOptionsDialog.open()
+    }
+
+    Dialog {
+        id:      pluginOptionsDialog
+        parent:  mainWindow.contentItem
+        visible: false
+        modal:   true
+        padding: 12
+        width:   Math.min(mainWindow.width * 0.9, 360)
+        x:       (mainWindow.width - width) / 2
+        y:       (mainWindow.height - height) / 2
+
+        header: ToolBar {
+            background: Rectangle { color: "#1565C0" }
+            RowLayout {
+                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
+                Label {
+                    text: "Traccar Live"
+                    color: "white"; font.pixelSize: 17; font.bold: true
+                    Layout.fillWidth: true
+                }
+                HeaderButton {
+                    icon.source: "icons/close.svg"
+                    onClicked: pluginOptionsDialog.close()
+                }
+            }
+        }
+
+        ColumnLayout {
+            width:   parent.width
+            spacing: 8
+
+            Switch {
+                text:             "Show icon on canvas"
+                checked:          cfg.showButton
+                onToggled:        cfg.showButton = checked
+                Layout.fillWidth: true
+            }
+            Label {
+                text:             "When hidden, open Traccar Live from here. Live tracking and markers keep running."
+                wrapMode:         Text.WordWrap
+                color:            "#666666"
+                font.pixelSize:   12
+                Layout.fillWidth: true
+            }
+            Button {
+                text:             "Open Traccar Live"
+                Layout.fillWidth: true
+                onClicked:        { pluginOptionsDialog.close(); mainDialog.open() }
+            }
+        }
     }
 
     // ── Live refresh: only while the window is still moving ───────────────
@@ -639,7 +705,7 @@ Item {
             if (Math.abs(point.x - s.x) < 24 && Math.abs(point.y - s.y) < 24) {
                 var msg = d.name + "\nFix " + _ageText(d.fixTime) + " ago"
                 msg += "  •  " + Math.round((d.speed || 0) * 1.852) + " km/h"
-                if (d.battery !== null && d.battery !== undefined) msg += "  •  🔋" + d.battery + "%"
+                if (d.battery !== null && d.battery !== undefined) msg += "  •  battery " + d.battery + "%"
                 mainWindow.displayToast(msg)
                 return true
             }
@@ -650,6 +716,19 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
     //  MAIN DIALOG
     // ════════════════════════════════════════════════════════════════════════
+    function _latLonText(p) {
+        return p.latitude.toFixed(6) + ", " + p.longitude.toFixed(6)
+    }
+
+    // QML has no clipboard API — copy through a hidden text field
+    TextEdit { id: clipboardHelper; visible: false }
+    function copyToClipboard(text) {
+        clipboardHelper.text = text
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+        clipboardHelper.text = ""
+    }
+
     Dialog {
         id:      mainDialog
         parent:  mainWindow.contentItem
@@ -657,10 +736,12 @@ Item {
         modal:   true
         padding: 8
         width:   plugin.phone ? mainWindow.width : Math.min(mainWindow.width * 0.9, 460)
-        height:  plugin.phone ? mainWindow.height - plugin.topInset - plugin.bottomInset
-                              : Math.min(mainWindow.height * 0.9, 780)
+        // ~70% of the available height, so the map stays visible around it
+        height:  plugin.phone ? (mainWindow.height - plugin.topInset - plugin.bottomInset) * 0.7
+                              : Math.min(mainWindow.height * 0.63, 550)
         x:       (mainWindow.width - width) / 2
-        y:       plugin.phone ? plugin.topInset : (mainWindow.height - height) / 2
+        y:       plugin.phone ? plugin.topInset + (mainWindow.height - plugin.topInset - plugin.bottomInset - height) / 2
+                              : (mainWindow.height - height) / 2
 
         header: ToolBar {
             background: Rectangle { color: "#1565C0" }
@@ -681,20 +762,12 @@ Item {
                     background: Item {}
                     onClicked: { mainDialog.close(); helpDialog.open() }
                 }
-                ToolButton {
-                    contentItem: Text {
-                        text: "🔧"; color: "white"; font.pixelSize: 18
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Item {}
+                HeaderButton {
+                    icon.source: "icons/settings.svg"
                     onClicked: openSettings("")
                 }
-                ToolButton {
-                    contentItem: Text {
-                        text: "✕"; color: "white"; font.pixelSize: 18
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Item {}
+                HeaderButton {
+                    icon.source: "icons/close.svg"
                     onClicked: mainDialog.close()
                 }
             }
@@ -740,7 +813,7 @@ Item {
                 Label {
                     id: errLabel
                     anchors { fill: parent; margins: 6 }
-                    text: "⚠  " + plugin.liveError + "  — tap to check settings"
+                    text: plugin.liveError + "  — tap to check settings"
                     wrapMode: Text.WordWrap
                     font.pixelSize: 12
                     color: "#B71C1C"
@@ -800,7 +873,7 @@ Item {
                         onActivated: cfg.eventFeatureFid = eventFeatureModel.get(currentIndex).fid
                     }
                     ToolButton {
-                        text: "🔄"
+                        icon.source: "icons/refresh.svg"
                         onClicked: _refreshFeatureCombo()
                     }
                 }
@@ -843,14 +916,16 @@ Item {
                 spacing: 6
                 Button {
                     Layout.fillWidth: true
-                    text: cfg.liveOn ? "⏹  Stop live" : "▶  Live"
+                    text: cfg.liveOn ? "Stop live" : "Live"
+                    icon.source: cfg.liveOn ? "icons/stop.svg" : "icons/play.svg"
                     onClicked: {
                         cfg.liveOn = !cfg.liveOn
                         if (cfg.liveOn) loadWindow()
                     }
                 }
                 Button {
-                    text: plugin.loading ? "…" : "🔄"
+                    text: plugin.loading ? "…" : ""
+                    icon.source: plugin.loading ? "" : "icons/refresh.svg"
                     enabled: !plugin.loading
                     onClicked: loadWindow()
                 }
@@ -888,10 +963,11 @@ Item {
                 Layout.minimumHeight: 60
                 clip:  true
                 model: plugin.deviceRows
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: Rectangle {
                     width:  ListView.view.width
-                    height: 54
+                    height: 68
                     color:  index % 2 === 0 ? "#F5F5F5" : "white"
                     property var row: modelData
 
@@ -919,14 +995,32 @@ Item {
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }
+                            Label {
+                                visible: row.pos !== null
+                                text: row.pos ? _latLonText(row.pos) : ""
+                                font.pixelSize: 11
+                                color: "#1565C0"
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
                         }
                         ToolButton {
                             visible: row.pos !== null
-                            contentItem: Text {
-                                text: "⌖"; font.pixelSize: 20
-                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                            icon.source: "icons/copy.svg"
+                            icon.width:  20
+                            icon.height: 20
+                            background:  Item {}
+                            onClicked: {
+                                copyToClipboard(_latLonText(row.pos))
+                                mainWindow.displayToast(row.name + ": " + _latLonText(row.pos) + " copied")
                             }
-                            background: Item {}
+                        }
+                        ToolButton {
+                            visible: row.pos !== null
+                            icon.source: "icons/locate.svg"
+                            icon.width:  22
+                            icon.height: 22
+                            background:  Item {}
                             onClicked: { zoomToDevice(row.pos); mainDialog.close() }
                         }
                     }
@@ -936,7 +1030,7 @@ Item {
             // ── Save ──────────────────────────────────────────────────────
             Label {
                 visible:          plugin.writeQueue.length > 0
-                text:             "⏳ Waiting for QFieldCloud sync to finish before saving…"
+                text:             "Waiting for QFieldCloud sync to finish before saving…"
                 font.pixelSize:   12
                 color:            "#E65100"
                 wrapMode:         Text.WordWrap
@@ -947,12 +1041,14 @@ Item {
                 spacing: 6
                 Button {
                     Layout.fillWidth: true
-                    text: "📍 Save positions"
+                    text: "Save positions"
+                    icon.source: "icons/point.svg"
                     onClicked: savePositions()
                 }
                 Button {
                     Layout.fillWidth: true
-                    text: "〰 Save tracks"
+                    text: "Save tracks"
+                    icon.source: "icons/track.svg"
                     onClicked: saveTracks()
                 }
             }
@@ -994,7 +1090,7 @@ Item {
 
     function savesToText() {
         if (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
-            return "⚠ No layers chosen to save to — tap here"
+            return "No layers chosen to save to — tap here"
         var parts = []
         if (cfg.pointsLayerName !== "")
             parts.push("Positions → " + cfg.pointsLayerName
@@ -1024,12 +1120,8 @@ Item {
             background: Rectangle { color: "#1565C0" }
             RowLayout {
                 anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
-                ToolButton {
-                    contentItem: Text {
-                        text: "←"; color: "white"; font.pixelSize: 20
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Item {}
+                HeaderButton {
+                    icon.source: "icons/back.svg"
                     onClicked: helpDialog.close()
                 }
                 Label {
@@ -1055,9 +1147,9 @@ Item {
                 Label { text: "Getting started"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "1. 🔧 Settings → Connection: enter your Traccar server and account, tap Test.\n" +
-                          "2. Choose a time window and tap ▶ Live (or 🔄 to load it once).\n" +
-                          "3. To keep what you see, pick layers in 🔧 Settings → Layers and use the Save buttons."
+                    text: "1. Settings → Connection: enter your Traccar server and account, tap Test.\n" +
+                          "2. Choose a time window and tap Live (or the refresh button to load it once).\n" +
+                          "3. To keep what you see, pick layers in Settings → Layers and use the Save buttons."
                 }
 
                 Label { text: "Time window"; font.bold: true; font.pixelSize: 15 }
@@ -1068,17 +1160,17 @@ Item {
                           "• Last 15 min … Last 3 months — follows the current time.\n" +
                           "• Custom dates — enter From / To in local time, tap Show this window.\n" +
                           "• From feature — use the start/end times of a feature (e.g. an incident). " +
-                          "Set the layer up once in 🔧 Settings → Advanced.\n" +
+                          "Set the layer up once in Settings → Advanced.\n" +
                           "Each device row shows how many fixes it has in the window and their time span."
                 }
 
-                Label { text: "Live, 🔄 and Clear"; font.bold: true; font.pixelSize: 15 }
+                Label { text: "Live, Refresh and Clear"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "▶ Live refreshes every few seconds and keeps a 'Last …' window moving. " +
+                    text: "Live refreshes every few seconds and keeps a 'Last …' window moving. " +
                           "A window that ends in the past cannot change, so Live pauses for it and markers " +
                           "show each device's last fix in that window.\n" +
-                          "🔄 loads the window once.  Clear removes everything from the map.\n" +
+                          "Refresh loads the window once.  Clear removes everything from the map.\n" +
                           "Nothing is written to your project until you tap a Save button."
                 }
 
@@ -1088,15 +1180,15 @@ Item {
                     text: "Markers are blue when the last fix is recent and grey when it is older than the " +
                           "limit in Settings → Advanced. Tap a marker for name, fix age, speed and battery. " +
                           "Markers, Labels, Tracks and Accuracy circles can each be switched on or off. " +
-                          "⌖ in the device list centres the map on that device."
+                          "In the device list, the target button centres the map on a device and the copy button copies its lat/long."
                 }
 
                 Label { text: "Saving"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "📍 Save positions — adds a point per device: its latest fix, or every fix in the " +
+                    text: "Save positions — adds a point per device: its latest fix, or every fix in the " +
                           "window (Settings → Layers).\n" +
-                          "〰 Save tracks — adds one line per device for the window, or replaces that " +
+                          "Save tracks — adds one line per device for the window, or replaces that " +
                           "device's previous track if 'Keep most recent' is chosen.\n" +
                           "Fields are filled by name (device_id, name, fix_time, speed_kmh, battery, " +
                           "start_time, last_update, …); fields your layer doesn't have are skipped. " +
@@ -1116,7 +1208,7 @@ Item {
                 Label { text: "Session tag"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "🔧 Settings → Tag stamps a text such as FIRE-2026-001 onto everything you save. " +
+                    text: "Settings → Tag stamps a text such as FIRE-2026-001 onto everything you save. " +
                           "With 'From feature', the feature's display value can be used as the tag instead."
                 }
                 Item { height: 8 }
@@ -1155,12 +1247,8 @@ Item {
             background: Rectangle { color: "#1565C0" }
             RowLayout {
                 anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
-                ToolButton {
-                    contentItem: Text {
-                        text: "←"; color: "white"; font.pixelSize: 20
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Item {}
+                HeaderButton {
+                    icon.source: "icons/back.svg"
                     onClicked: {
                         settingsDialog.commitText()
                         if (settingsDialog.page !== "") settingsDialog.page = ""
@@ -1172,12 +1260,8 @@ Item {
                     color: "white"; font.pixelSize: 17; font.bold: true
                     Layout.fillWidth: true
                 }
-                ToolButton {
-                    contentItem: Text {
-                        text: "✕"; color: "white"; font.pixelSize: 18
-                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Item {}
+                HeaderButton {
+                    icon.source: "icons/close.svg"
                     onClicked: settingsDialog.close()
                 }
             }
@@ -1270,10 +1354,10 @@ Item {
                         warn:    !plugin.isConnected() || (plugin.connState !== "" && plugin.connState !== "ok")
                         summary: {
                             var host = cfg.serverUrl.replace(/^https?:\/\//, "")
-                            if (cfg.username === "") return "⚠ Not set up — tap to connect"
-                            var st = plugin.connState === "ok" ? "✓ connected"
+                            if (cfg.username === "") return "Not set up — tap to connect"
+                            var st = plugin.connState === "ok" ? "connected"
                                    : plugin.connState === ""   ? "not tested"
-                                   : "✕ " + plugin.connState
+                                   : "Error: " + plugin.connState
                             return host + "  ·  " + cfg.username + "  ·  " + st
                         }
                     }
@@ -1283,7 +1367,7 @@ Item {
                         warn:    cfg.pointsLayerName === "" && cfg.tracksLayerName === ""
                         summary: {
                             if (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
-                                return "⚠ Nothing to save to yet"
+                                return "Nothing to save to yet"
                             var p = cfg.pointsLayerName === "" ? "—" : cfg.pointsLayerName
                                     + (cfg.pointsNameField !== "" ? " (name → " + cfg.pointsNameField + ")" : "")
                             var t = cfg.tracksLayerName === "" ? "—" : cfg.tracksLayerName
@@ -1296,7 +1380,7 @@ Item {
                         onClicked: settingsDialog.page = "tag"
                         summary: !cfg.incidentRefEnabled ? "Off"
                                  : (cfg.sessionTag !== "" ? cfg.sessionTag : "(no text)")
-                                   + " → " + (cfg.incidentRefField !== "" ? cfg.incidentRefField : "⚠ no field")
+                                   + " → " + (cfg.incidentRefField !== "" ? cfg.incidentRefField : "no field")
                     }
                     SettingsRow {
                         title:   "Advanced"
@@ -1348,7 +1432,7 @@ Item {
                         Layout.fillWidth: true
                         visible: plugin.connState !== ""
                         wrapMode: Text.WordWrap
-                        text: plugin.connState === "ok" ? "✓ Connected" : "✕ " + plugin.connState
+                        text: plugin.connState === "ok" ? "Connected" : "Error: " + plugin.connState
                         color: plugin.connState === "ok" ? "#2E7D32" : "#B71C1C"
                     }
                     Hint { text: "Use the same address you open in a browser for Traccar." }
@@ -1360,7 +1444,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 4
 
-                    Label { text: "📍 Positions"; font.bold: true; font.pixelSize: 15 }
+                    Label { text: "Positions"; font.bold: true; font.pixelSize: 15 }
                     Label { text: "Layer" }
                     PickCombo {
                         id: pointsLayerCombo
@@ -1394,7 +1478,7 @@ Item {
                     }
 
                     Item { height: 8 }
-                    Label { text: "〰 Tracks"; font.bold: true; font.pixelSize: 15 }
+                    Label { text: "Tracks"; font.bold: true; font.pixelSize: 15 }
                     Label { text: "Layer" }
                     PickCombo {
                         id: tracksLayerCombo
@@ -1576,7 +1660,7 @@ Item {
         } else {
             if (eventFeatureModel.count === 0) populateEventFeatures()
             var f = _selectedEventFeature()
-            if (!f) return { error: "Choose a feature (set the layer up in 🔧 Settings → Advanced)" }
+            if (!f) return { error: "Choose a feature (set the layer up in Settings → Advanced)" }
             var dur = cfg.featureDuration * 60000
             if (cfg.featureSpan === 2) {
                 if (f.endIso === "") return { error: "That feature has no end time" }
@@ -1607,10 +1691,10 @@ Item {
         if (plugin.statusMsg !== "") return plugin.statusMsg
         var w = plugin.win
         if (w === null) {
-            return cfg.liveOn ? "Loading…" : "Tap ▶ Live to follow devices, or 🔄 to load this window once."
+            return cfg.liveOn ? "Loading…" : "Tap Live to follow devices, or Refresh to load this window once."
         }
         var spanMs = new Date(w.toIso).getTime() - new Date(w.fromIso).getTime()
-        var big    = spanMs > 7 * 86400000 ? "\n⚠ Long window — loading and drawing may be slow." : ""
+        var big    = spanMs > 7 * 86400000 ? "\nLong window — loading and drawing may be slow." : ""
         if (w.trimMinutes > 0)
             return _spanText(w.fromIso, w.toIso) + "  ·  " + (cfg.liveOn ? "updating live" : "Live is off") + big
         if (w.moving)
@@ -1851,7 +1935,7 @@ Item {
             if (pos) {
                 line += "  ·  " + Math.round((pos.speed || 0) * 1.852) + " km/h"
                 var a = pos.attributes || {}
-                if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  🔋" + a.batteryLevel + "%"
+                if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  batt " + a.batteryLevel + "%"
             }
             rows.push({ name: dname, line: line, pos: pos, fresh: pos ? _isFresh(pos.fixTime) : false })
         }
@@ -1865,7 +1949,7 @@ Item {
         _get("/api/devices", function(data) {
             plugin.connState = "ok"
             plugin.liveError = ""
-            mainWindow.displayToast("✓ Connected — " + data.length + " device(s)")
+            mainWindow.displayToast("Connected — " + data.length + " device(s)")
         }, function(msg) {
             plugin.connState = msg.indexOf("401") >= 0 ? "wrong username or password" : msg
             mainWindow.displayToast(msg)
@@ -1894,7 +1978,7 @@ Item {
             openSettings("layers")
             return
         }
-        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap 🔄 or ▶ Live"); return }
+        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap Refresh or Live"); return }
         var positions = []
         if (cfg.pointsMode === 1) {
             for (var k in plugin.tracks) positions = positions.concat(plugin.tracks[k])
@@ -1913,7 +1997,7 @@ Item {
                 if (n === 0) throw "the layer did not accept the points"
                 if (!lyr.commitChanges()) throw "the layer could not save the points"
                 lyr.triggerRepaint()
-                mainWindow.displayToast("✓ Saved " + n + " point(s) to " + cfg.pointsLayerName)
+                mainWindow.displayToast("Saved " + n + " point(s) to " + cfg.pointsLayerName)
             } catch(e) {
                 try { lyr.rollBack() } catch(e2) {}
                 mainWindow.displayToast("Positions layer error: " + e)
@@ -1927,7 +2011,7 @@ Item {
             openSettings("layers")
             return
         }
-        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap 🔄 or ▶ Live"); return }
+        if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap Refresh or Live"); return }
         var byDev = {}
         var n = 0
         for (var k in plugin.tracks) {
@@ -1938,7 +2022,7 @@ Item {
                      lookup: plugin.deviceInfo, tag: plugin.win.tag }
         _queueWrite(function() {
             var written = _writeTracks(byDev, info)
-            if (written >= 0) mainWindow.displayToast("✓ Saved " + written + " track(s) to " + cfg.tracksLayerName)
+            if (written >= 0) mainWindow.displayToast("Saved " + written + " track(s) to " + cfg.tracksLayerName)
         })
     }
 
