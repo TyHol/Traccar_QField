@@ -10,6 +10,7 @@ other than site-packages, set PYSIDE6_DIR to the folder that contains PySide6.
 """
 
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -30,7 +31,7 @@ os.environ["QT_QUICK_CONTROLS_STYLE"] = "Material"     # QField's style
 
 from PySide6.QtCore import (QCoreApplication, QSettings, QUrl, QMetaObject, QTimer,  # noqa: E402
                             QtMsgType, qInstallMessageHandler)
-from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtGui import QColor, QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,6 +125,9 @@ ctx = engine.rootContext()
 ctx.setContextProperty("serverUrl", URL)
 ctx.setContextProperty("mainQmlUrl", QUrl.fromLocalFile(MAIN).toString())
 ctx.setContextProperty("vanStartIso", VAN_START.isoformat())
+# Device colour as the QGIS plugin Traccar Live makes it (MD5 of the name → hue)
+ctx.setContextProperty("phoneAColor", QColor.fromHsv(
+    int(hashlib.md5(b"Phone A", usedforsecurity=False).hexdigest()[:4], 16) % 360, 190, 200).name())
 engine.load(QUrl.fromLocalFile(os.path.join(HERE, "Driver.qml")))
 if not engine.rootObjects():
     for m in LOG:
