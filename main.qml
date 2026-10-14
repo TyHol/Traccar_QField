@@ -31,6 +31,8 @@ Item {
     property var mapCanvas:    iface.mapCanvas()
     property var pointHandler: iface.findItemByObjectName("pointHandler")
     property var wgs84:        CoordinateReferenceSystemUtils.fromDescription("EPSG:4326")
+    property var irishGridCrs: CoordinateReferenceSystemUtils.fromDescription("EPSG:29903")
+    property var ukGridCrs:    CoordinateReferenceSystemUtils.fromDescription("EPSG:27700")
 
     // Dialog geometry: full screen on phones, floating panel on wider screens
     property bool phone:       mainWindow.width < 520
@@ -62,6 +64,8 @@ Item {
         property bool   showAccuracy:    false
         property bool   showTrails:      true   // "Tracks" toggle
         property bool   showButton:      true   // toolbar button on the map canvas
+        property string hiddenDevices:   ""     // comma-separated Traccar ids unticked in the device list
+        property int    locationFormat:  0      // 0 = lat / long, 1 = Irish Grid, 2 = UK Grid, 3 = deg + min, 4 = project CRS
 
         // Layers (written only on Save)
         property string pointsLayerName: ""
@@ -620,7 +624,7 @@ Item {
                 property var pts:  { plugin.mapTick; return plugin._toScreen(proj) }
                 visible: pts.length > 1
                 ShapePath {
-                    strokeColor: modelData.fresh ? "#AA1565C0" : "#AA9E9E9E"
+                    strokeColor: "#AA" + modelData.color.substr(1)
                     strokeWidth: 3
                     fillColor:   "transparent"
                     capStyle:    ShapePath.RoundCap
@@ -638,7 +642,7 @@ Item {
                 property var   d:  modelData
                 property var   mp: { plugin.crsTick; return plugin._toMapPoint(d.lon, d.lat) }
                 property point sp: { plugin.mapTick; return plugin.mapCanvas.mapSettings.coordinateToScreen(mp) }
-                property color c:  d.fresh ? "#1565C0" : "#9E9E9E"
+                property color c:  d.color
                 x: sp.x
                 y: sp.y
                 width: 0; height: 0
@@ -713,6 +717,9 @@ Item {
         var out = []
         for (var i = 0; i < mapPoints.length; i++) {
             var s = ms.coordinateToScreen(mapPoints[i])
+            // a vertex less than a pixel from the last one adds nothing to the line
+            var q = out.length > 0 ? out[out.length - 1] : null
+            if (q && i < mapPoints.length - 1 && Math.abs(s.x - q.x) < 1 && Math.abs(s.y - q.y) < 1) continue
             out.push(Qt.point(s.x, s.y))
         }
         return out
@@ -729,13 +736,57 @@ Item {
         return (Date.now() - new Date(fixTime).getTime()) < cfg.staleMinutes * 60000
     }
 
-    // Keep at most maxPts vertices for drawing (always keeps first and last)
-    function _decimate(coords, maxPts) {
-        if (coords.length <= maxPts) return coords
-        var out  = []
-        var step = (coords.length - 1) / (maxPts - 1)
-        for (var i = 0; i < maxPts; i++) out.push(coords[Math.round(i * step)])
+    // Vertices for drawing (always keeps first and last). Fixes within ~1 m of the previous kept one
+    // are dropped first — a parked device repeats its position — so moving fixes are kept and
+    // corners aren't cut; only a track still over maxPts is thinned evenly.
+    function _thin(coords, maxPts) {
+        if (coords.length <= 2) return coords
+        var out = [coords[0]]
+        for (var i = 1; i < coords.length - 1; i++) {
+            var q = out[out.length - 1]
+            if (Math.abs(coords[i].lon - q.lon) > 1e-5 || Math.abs(coords[i].lat - q.lat) > 1e-5) out.push(coords[i])
+        }
+        out.push(coords[coords.length - 1])
+        if (out.length <= maxPts) return out
+        var even = []
+        var step = (out.length - 1) / (maxPts - 1)
+        for (var j = 0; j < maxPts; j++) even.push(out[Math.round(j * step)])
+        return even
+    }
+
+    // Same colour for the same device name as the QGIS plugin Traccar Live (MD5 → hue)
+    function _deviceColor(name) {
+        var hue = parseInt(Qt.md5(String(name)).substr(0, 4), 16) % 360
+        return String(Qt.hsva(hue / 360, 190 / 255, 200 / 255, 1))
+    }
+
+    // ── Devices unticked in the list: hidden on the map, left out of saving ──
+    function _hiddenIds() {
+        var out = {}
+        cfg.hiddenDevices.split(",").forEach(function(s) { if (s !== "") out[s] = true })
         return out
+    }
+
+    function isHidden(id) {
+        return _hiddenIds()[String(id)] === true
+    }
+
+    function _setHidden(ids) {
+        cfg.hiddenDevices = Object.keys(ids).sort(function(a, b) { return a - b }).join(",")
+        _rebuildAll()
+    }
+
+    function setDeviceShown(id, on) {
+        var ids = _hiddenIds()
+        if (on) delete ids[String(id)]
+        else    ids[String(id)] = true
+        _setHidden(ids)
+    }
+
+    function setAllShown(on) {
+        var ids = {}
+        if (!on) for (var devId in plugin.deviceInfo) ids[String(devId)] = true
+        _setHidden(ids)
     }
 
     function _onMapTap(point) {
@@ -760,6 +811,84 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
     function _latLonText(p) {
         return p.latitude.toFixed(6) + ", " + p.longitude.toFixed(6)
+    }
+
+    // Grid letters — same as the QGIS plugin Traccar Live and the QField plugin Conversion_tools
+    readonly property string osLetters: "ABCDEFGHJKLMNOPQRSTUVWXYZ"     // A–Z without I
+    readonly property string igLetters: "VWXYZQRSTULMNOPFGHJKABCDE"     // Irish Grid, rows from the south
+
+    function _pad5(v) { return ("0000" + (v % 100000)).slice(-5) }
+
+    // Irish Grid (EPSG:29903) easting / northing → "O 15904 34671", or "" outside the grid
+    function _irishGridRef(x, y) {
+        x = Math.round(x); y = Math.round(y)
+        if (!(x >= 0 && x < 500000 && y >= 0 && y < 500000)) return ""
+        return igLetters[Math.floor(y / 100000) * 5 + Math.floor(x / 100000)] + " " + _pad5(x) + " " + _pad5(y)
+    }
+
+    // British National Grid (EPSG:27700) easting / northing → "NS 45140 72887", or "" outside the grid
+    function _ukGridRef(x, y) {
+        x = Math.round(x); y = Math.round(y)
+        if (!(x >= 0 && x < 700000 && y >= 0 && y < 1300000)) return ""
+        var e = Math.floor(x / 100000), n = 19 - Math.floor(y / 100000)
+        var first  = n - n % 5 + Math.floor((e + 10) / 5)     // 500 km square
+        var second = n * 5 % 25 + e % 5                       // 100 km square within it
+        return osLetters[first] + osLetters[second] + " " + _pad5(x) + " " + _pad5(y)
+    }
+
+    // Degrees + minutes with N/S/E/W, as the QGIS plugin: "53° 21.900' N, 6° 18.600' W"
+    function _dmText(lat, lon) {
+        function one(v, hemi) {
+            var total = Math.round(Math.abs(v) * 60000) / 1000      // rounded first: never shows 60.000'
+            var deg   = Math.floor(total / 60)
+            var mins  = (total - deg * 60).toFixed(3)
+            return deg + "° " + (mins.length < 6 ? "0" : "") + mins + "' " + (v >= 0 ? hemi[0] : hemi[1])
+        }
+        return one(lat, "NS") + ", " + one(lon, "EW")
+    }
+
+    // Project CRS, falling back to the map's CRS
+    function _projectCrs() {
+        try { if (qgisProject.crs && qgisProject.crs.authid) return qgisProject.crs } catch(e) {}
+        return plugin.mapCanvas.mapSettings.destinationCrs
+    }
+
+    // Location formats: value = cfg.locationFormat (kept stable), listed in this order
+    readonly property var locationFormats: [
+        { value: 0, label: "Lat / long" },
+        { value: 3, label: "Degrees + minutes" },
+        { value: 1, label: "Irish Grid" },
+        { value: 2, label: "UK Grid" },
+        { value: 4, label: "Project CRS" }
+    ]
+
+    function _locationLabel(v) {
+        for (var i = 0; i < locationFormats.length; i++)
+            if (locationFormats[i].value === v) return locationFormats[i].label
+        return locationFormats[0].label
+    }
+
+    // A position in the format chosen in Settings → Advanced; lat / long outside the chosen grid
+    function _locationText(p) {
+        if (cfg.locationFormat === 3) return _dmText(p.latitude, p.longitude)
+        if (cfg.locationFormat === 4) {
+            try {
+                var crs = _projectCrs()
+                var xy  = GeometryUtils.reprojectPoint(GeometryUtils.point(p.longitude, p.latitude), plugin.wgs84, crs)
+                if (crs.isGeographic) return xy.y.toFixed(6) + ", " + xy.x.toFixed(6)
+                if (isFinite(xy.x) && isFinite(xy.y)) return xy.x.toFixed(1) + ", " + xy.y.toFixed(1)
+            } catch(e2) {}
+        }
+        if (cfg.locationFormat === 1 || cfg.locationFormat === 2) {
+            try {
+                var irish = cfg.locationFormat === 1
+                var g = GeometryUtils.reprojectPoint(GeometryUtils.point(p.longitude, p.latitude), plugin.wgs84,
+                                                     irish ? plugin.irishGridCrs : plugin.ukGridCrs)
+                var ref = irish ? _irishGridRef(g.x, g.y) : _ukGridRef(g.x, g.y)
+                if (ref !== "") return ref
+            } catch(e) {}
+        }
+        return _latLonText(p)
     }
 
     // QML has no clipboard API — copy through a hidden text field
@@ -991,7 +1120,19 @@ Item {
             // ── Devices ───────────────────────────────────────────────────
             RowLayout {
                 Layout.fillWidth: true
-                Label { text: "Devices  (" + plugin.deviceRows.length + ")"; font.bold: true; Layout.fillWidth: true }
+                ShowBox {
+                    id: allDevicesBox
+                    property int nShown: plugin.deviceRows.filter(function(r) { return r.shown }).length
+                    Layout.fillWidth: true
+                    font.bold: true
+                    text: "Devices  (" + (nShown === plugin.deviceRows.length ? nShown
+                                          : nShown + " of " + plugin.deviceRows.length + " shown") + ")"
+                    enabled: plugin.deviceRows.length > 0
+                    checkState: nShown === 0 ? Qt.Unchecked
+                              : nShown === plugin.deviceRows.length ? Qt.Checked : Qt.PartiallyChecked
+                    nextCheckState: function() { return nShown === plugin.deviceRows.length ? Qt.Unchecked : Qt.Checked }
+                    onClicked: plugin.setAllShown(checkState === Qt.Checked)
+                }
                 Label {
                     visible: plugin.lastFetched !== ""
                     text: "updated " + plugin.lastFetched
@@ -1014,15 +1155,22 @@ Item {
                     property var row: modelData
 
                     RowLayout {
-                        anchors { fill: parent; leftMargin: 10; rightMargin: 4 }
-                        spacing: 8
+                        anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
+                        spacing: 4
+                        ShowBox {
+                            checked: row.shown
+                            onToggled: plugin.setDeviceShown(row.id, checked)
+                        }
                         Rectangle {
                             width: 10; height: 10; radius: 5
-                            color: row.fresh ? "#4CAF50" : "#9E9E9E"
+                            color: row.color
+                            opacity: row.shown ? 1 : 0.4
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
+                            Layout.leftMargin: 4
                             spacing: 1
+                            opacity: row.shown ? 1 : 0.5
                             Label {
                                 text: row.name
                                 font.bold: true
@@ -1039,7 +1187,7 @@ Item {
                             }
                             Label {
                                 visible: row.pos !== null
-                                text: row.pos ? _latLonText(row.pos) : ""
+                                text: { cfg.locationFormat; return row.pos ? _locationText(row.pos) : "" }
                                 font.pixelSize: 11
                                 color: "#1565C0"
                                 elide: Text.ElideRight
@@ -1050,8 +1198,9 @@ Item {
                             visible: row.pos !== null
                             icon.source: "icons/copy.svg"
                             onClicked: {
-                                copyToClipboard(_latLonText(row.pos))
-                                mainWindow.displayToast(row.name + ": " + _latLonText(row.pos) + " copied")
+                                var loc = _locationText(row.pos)
+                                copyToClipboard(loc)
+                                mainWindow.displayToast(row.name + ": " + loc + " copied")
                             }
                         }
                         RowButton {
@@ -1213,16 +1362,21 @@ Item {
                 Label { text: "On the map"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "Markers are blue when the last fix is recent and grey when it is older than the " +
-                          "limit in Settings → Advanced. Tap a marker for name, fix age, speed and battery. " +
-                          "Markers, Labels, Tracks and Accuracy circles can each be switched on or off. " +
-                          "In the device list, the target button centres the map on a device and the copy button copies its lat/long."
+                    text: "Each device has its own colour (the same as in the QGIS plugin Traccar Live); its " +
+                          "marker and track turn grey when the last fix is older than the limit in Settings → Advanced. " +
+                          "Tap a marker for name, fix age, speed and battery. " +
+                          "Markers, Labels, Tracks and Accuracy circles can each be switched on or off.\n" +
+                          "In the device list, untick a device to hide it from the map and leave it out of the " +
+                          "Save buttons (remembered); the tick next to 'Devices' shows or hides them all. " +
+                          "The target button centres the map on a device and the copy button copies its location — " +
+                          "lat / long, degrees + minutes, Irish Grid, UK Grid or the project CRS (Settings → Advanced)."
                 }
 
                 Label { text: "Saving"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "Save positions — adds a point per device: its latest fix, or every fix in the " +
+                    text: "Only ticked devices are saved.\n" +
+                          "Save positions — adds a point per device: its latest fix, or every fix in the " +
                           "window (Settings → Layers).\n" +
                           "Save tracks — adds one line per device for the window, or replaces that " +
                           "device's previous track if 'Keep most recent' is chosen.\n" +
@@ -1423,6 +1577,7 @@ Item {
                         title:   "Advanced"
                         onClicked: settingsDialog.page = "advanced"
                         summary: (cfg.showButton ? "" : "Map button hidden  ·  ")
+                                 + plugin._locationLabel(cfg.locationFormat) + "  ·  "
                                  + "Refresh every " + cfg.liveIntervalSec + " s  ·  grey after "
                                  + cfg.staleMinutes + " min\nFrom feature: "
                                  + (cfg.eventLayerName !== "" ? cfg.eventLayerName : "not set up")
@@ -1620,6 +1775,23 @@ Item {
                         Layout.fillWidth: true
                     }
                     Hint { text: "When hidden, open Traccar Live from QField's Plugins list: tap the settings icon next to Traccar Live." }
+
+                    Item { height: 8 }
+                    Label { text: "Location"; font.bold: true; font.pixelSize: 15 }
+                    ComboBox {
+                        id: locationCombo
+                        Layout.fillWidth: true
+                        model: plugin.locationFormats
+                        textRole:  "label"
+                        valueRole: "value"
+                        currentIndex: Math.max(0, indexOfValue(cfg.locationFormat))
+                        onActivated: cfg.locationFormat = currentValue
+                    }
+                    Hint {
+                        text: "Shown under each device and copied by its copy button. "
+                              + "Project CRS gives easting, northing (" + (plugin._projectCrs().authid || "?") + "). "
+                              + "A position outside the Irish or UK grid is shown as lat / long."
+                    }
 
                     Item { height: 8 }
                     Label { text: "Live"; font.bold: true; font.pixelSize: 15 }
@@ -1938,8 +2110,16 @@ Item {
         }
         plugin.markerPos = mp
 
+        var hidden = _hiddenIds()
+        function colorOf(devId, fixTime) {
+            if (!_isFresh(fixTime)) return "#9E9E9E"
+            var info = plugin.deviceInfo[devId] || {}
+            return _deviceColor(info.name || devId)
+        }
+
         var markers = []
         for (var id in mp) {
+            if (hidden[id]) continue
             var p     = mp[id]
             var info  = plugin.deviceInfo[id] || {}
             var attrs = p.attributes || {}
@@ -1950,7 +2130,7 @@ Item {
                 lat:     p.latitude,
                 acc:     p.accuracy || 0,
                 fixTime: p.fixTime,
-                fresh:   _isFresh(p.fixTime),
+                color:   colorOf(id, p.fixTime),
                 speed:   p.speed || 0,
                 battery: (attrs.batteryLevel !== undefined) ? attrs.batteryLevel : null
             })
@@ -1960,10 +2140,10 @@ Item {
         var lines = []
         for (var tk in plugin.tracks) {
             var pts = plugin.tracks[tk]
-            if (pts.length < 2) continue
+            if (pts.length < 2 || hidden[tk]) continue
             var coords = pts.map(function(q) { return { lon: q.longitude, lat: q.latitude } })
-            lines.push({ id: tk, fresh: _isFresh(pts[pts.length - 1].fixTime),
-                         coords: _decimate(coords, 1500) })   // saving always uses every fix
+            lines.push({ id: tk, color: colorOf(tk, pts[pts.length - 1].fixTime),
+                         coords: _thin(coords, 5000) })   // saving always uses every fix
         }
         plugin.trackModel = lines
 
@@ -1983,7 +2163,8 @@ Item {
                 var a = pos.attributes || {}
                 if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  batt " + a.batteryLevel + "%"
             }
-            rows.push({ name: dname, line: line, pos: pos, fresh: pos ? _isFresh(pos.fixTime) : false })
+            rows.push({ id: key, name: dname, line: line, pos: pos, shown: !hidden[key],
+                        color: pos ? colorOf(key, pos.fixTime) : "#9E9E9E" })
         }
         rows.sort(function(r1, r2) { return r1.name.localeCompare(r2.name) })
         plugin.deviceRows = rows
@@ -2026,10 +2207,11 @@ Item {
         }
         if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap Refresh or Live"); return }
         var positions = []
+        var hidden    = _hiddenIds()
         if (cfg.pointsMode === 1) {
-            for (var k in plugin.tracks) positions = positions.concat(plugin.tracks[k])
+            for (var k in plugin.tracks) if (!hidden[k]) positions = positions.concat(plugin.tracks[k])
         } else {
-            for (var k2 in plugin.markerPos) positions.push(plugin.markerPos[k2])
+            for (var k2 in plugin.markerPos) if (!hidden[k2]) positions.push(plugin.markerPos[k2])
         }
         if (positions.length === 0) { mainWindow.displayToast("No positions to save"); return }
         var lookup = plugin.deviceInfo
@@ -2058,10 +2240,11 @@ Item {
             return
         }
         if (plugin.win === null) { mainWindow.displayToast("Nothing loaded yet — tap Refresh or Live"); return }
-        var byDev = {}
-        var n = 0
+        var byDev  = {}
+        var n      = 0
+        var hidden = _hiddenIds()
         for (var k in plugin.tracks) {
-            if (plugin.tracks[k].length > 0) { byDev[k] = plugin.tracks[k]; n++ }
+            if (plugin.tracks[k].length > 0 && !hidden[k]) { byDev[k] = plugin.tracks[k]; n++ }
         }
         if (n === 0) { mainWindow.displayToast("No fixes in this window to save"); return }
         var info = { fromIso: plugin.win.fromIso, toIso: plugin.win.toIso,

@@ -59,6 +59,7 @@ ApplicationWindow {
     QtObject {
         id: projectStub
         property var layers: []
+        property var crs: ({ authid: "EPSG:2157", isGeographic: false })   // ITM (faked in GeometryUtils)
         function mapLayersByName(n) { return layers.filter(function(l) { return l.name === n }) }
         function layersMap() {
             var m = {}
@@ -323,6 +324,81 @@ ApplicationWindow {
                 if (res[j].open !== undefined && res[j].visible === false) { res[j].open(); res[j].close() }
             var o2 = opened()
             for (var c = 0; c < o2.length; c++) o2[c].close()
+            sleep(200)
+        },
+        function() {
+            // ── colour per device (same as the QGIS plugin), grey when stale ──
+            var phone = plugin.overlayModel.filter(function(m) { return m.name === "Phone A" })[0]
+            var van   = plugin.overlayModel.filter(function(m) { return m.name === "Van 3" })[0]
+            var c1 = Qt.lighter(phone.color, 1), c2 = Qt.lighter(phoneAColor, 1)
+            check("device colour matches the QGIS plugin", Math.abs(c1.r - c2.r) < 0.01 && Math.abs(c1.g - c2.g) < 0.01
+                  && Math.abs(c1.b - c2.b) < 0.01, phone.color + " vs " + phoneAColor)
+            check("stale device grey; track takes the device colour", van.color === "#9E9E9E"
+                  && plugin.trackModel[0].color === phone.color, van.color + " / " + plugin.trackModel[0].color)
+
+            // ── grid references ──
+            check("Irish Grid reference", plugin._irishGridRef(315904, 234671) === "O 15904 34671"
+                  && plugin._irishGridRef(600000, 1) === "", plugin._irishGridRef(315904, 234671))
+            check("UK Grid references", plugin._ukGridRef(245140, 672887) === "NS 45140 72887"
+                  && plugin._ukGridRef(651409, 313177) === "TG 51409 13177" && plugin._ukGridRef(-5, 10) === "",
+                  plugin._ukGridRef(245140, 672887) + " / " + plugin._ukGridRef(651409, 313177))
+            var pa = plugin.markerPos["1"]
+            cfg.locationFormat = 1
+            var ig = plugin._locationText(pa)
+            cfg.locationFormat = 2
+            var uk = plugin._locationText(pa)
+            var far = plugin._locationText({ longitude: 20, latitude: 0 })
+            cfg.locationFormat = 0
+            check("location as Irish Grid / UK Grid; lat / long outside the grid",
+                  /^O \d{5} \d{5}$/.test(ig) && /^[A-Z]{2} \d{5} \d{5}$/.test(uk) && far === "0.000000, 20.000000",
+                  ig + " | " + uk + " | " + far)
+            cfg.locationFormat = 3
+            var dm = plugin._locationText({ latitude: 53.365, longitude: -6.31 })
+            var dmEdge = plugin._dmText(53.9999999, 0.5)
+            cfg.locationFormat = 4
+            var prj = plugin._locationText({ latitude: 53.365, longitude: -6.31 })
+            cfg.locationFormat = 0
+            check("degrees + minutes", dm === "53° 21.900' N, 6° 18.600' W" && dmEdge === "54° 00.000' N, 0° 30.000' E",
+                  dm + " | " + dmEdge)
+            check("project CRS: easting, northing", prj === "-631000.0, 5336500.0", prj)
+            check("lat / long by default", plugin._locationText(pa) === pa.latitude.toFixed(6) + ", " + pa.longitude.toFixed(6))
+
+            // ── thinning for drawing ──
+            var line = [], parked = []
+            for (var i = 0; i < 12000; i++) line.push({ lon: i * 0.001, lat: 53 })
+            for (var j = 0; j < 3000; j++) parked.push({ lon: -6.3, lat: 53.3 })
+            parked.push({ lon: -6.29, lat: 53.3 }, { lon: -6.28, lat: 53.31 })
+            var t1 = plugin._thin(line, 5000), t2 = plugin._thin(parked, 5000)
+            check("long track thinned to 5000, ends kept", t1.length === 5000 && t1[0].lon === 0
+                  && t1[4999].lon === line[11999].lon, t1.length)
+            check("parked fixes dropped, moving fixes all kept", t2.length === 3 && t2[2].lat === 53.31, t2.length)
+
+            // ── per device show / hide ──
+            plugin.setDeviceShown("1", false)
+            var rowA = plugin.deviceRows.filter(function(r) { return r.name === "Phone A" })[0]
+            check("untick Phone A: off the map, row unticked, remembered",
+                  plugin.overlayModel.length === 1 && plugin.overlayModel[0].name === "Van 3"
+                  && plugin.trackModel.length === 0 && rowA.shown === false && cfg.hiddenDevices === "1")
+            cfg.pointsLayerName = "pts2d"; cfg.pointsMode = 0
+            var n0 = L.pts2d._committed.length
+            plugin.savePositions()
+            check("hidden device not saved (positions)", L.pts2d._committed.length === n0 + 1
+                  && lastOf(L.pts2d).attribute("name") === "Van 3")
+            cfg.tracksLayerName = "trkZM"
+            var n1 = L.trkZM._committed.length
+            plugin.saveTracks()
+            check("hidden device not saved (tracks)", L.trkZM._committed.length === n1)
+            plugin.setAllShown(false)
+            check("hide all", plugin.overlayModel.length === 0 && cfg.hiddenDevices === "1,2,3", cfg.hiddenDevices)
+            plugin.setAllShown(true)
+            check("show all", plugin.overlayModel.length === 2 && cfg.hiddenDevices === "")
+            toolbarRow.children[0].clicked()     // draw the device list with a hidden device
+            plugin.setDeviceShown("2", false)
+            sleep(200)
+        },
+        function() {
+            opened()[0].close()
+            plugin.setAllShown(true)
             sleep(200)
         },
         function() {

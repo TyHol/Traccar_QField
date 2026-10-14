@@ -8,22 +8,22 @@ A [QField](https://qfield.org) plugin that shows your [Traccar](https://www.trac
 - **QFieldCloud-safe** — saves wait while a cloud sync is running, then go ahead.
 - **Local time everywhere** on screen, including summer time; stored in UTC.
 
-Latest release: **[v0.5](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
+Latest release: **[v0.6](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
 
 ---
 
 ## Install
-<img width="150" height="150" alt="QR code for the v0.5 install link" src="install_qr_traccar_qfield-v0.5.png" />
+<img width="150" height="150" alt="QR code for the v0.6 install link" src="install_qr_traccar_qfield-v0.6.png" />
 
 **From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
 ```
-https://github.com/TyHol/Traccar_QField/releases/download/v0.5/traccar_qfield-v0.5.zip
+https://github.com/TyHol/Traccar_QField/releases/download/v0.6/traccar_qfield-v0.6.zip
 ```
 
-**From a file** — download `traccar_qfield-v0.5.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
+**From a file** — download `traccar_qfield-v0.6.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
 
-**Upgrading from v0.4.1 or earlier, installed from a link?** Older zips were named without a hyphen, so QField kept each version as a separate plugin. Uninstall the old *Traccar Live* in QField's Plugins list, then install v0.5. From v0.5 on, new versions replace the installed one.
+**Upgrading from v0.4.1 or earlier, installed from a link?** Older zips were named without a hyphen, so QField kept each version as a separate plugin. Uninstall the old *Traccar Live* in QField's Plugins list, then install v0.6. From v0.5 on, new versions replace the installed one.
 
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 
@@ -53,13 +53,13 @@ Each device in the list shows how many fixes it has in the window and their time
 - **Live / Stop live** — refresh every few seconds (10 s by default).
 - **Refresh** — load the window once. **Clear** — stop Live and remove everything from the map.
 - **Show** — switch Markers, Labels, Tracks and Accuracy circles on or off.
-- **Devices** — each row shows the latest position as lat/long; the copy button copies it to the clipboard and the target button centres the map on that device. Markers are blue when the last fix is recent and grey when it is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
+- **Devices** — each row shows the latest position (lat/long, degrees + minutes, Irish Grid, UK Grid or the project CRS — Settings (cog) → Advanced); the copy button copies it to the clipboard and the target button centres the map on that device. Untick a device to hide it from the map and leave it out of the Save buttons (remembered); the tick by *Devices* shows or hides them all. Each device has its own colour (the same as in the QGIS plugin); markers and tracks turn grey when the last fix is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
 - **Save positions** / **Save tracks** — the line underneath shows where they go; tap it to change.
 
 ### Saving
 | Button | Option (Settings (cog) → Layers) | Adds |
 |---|---|---|
-| Save positions | *Latest fix per device* | one point per device |
+| Save positions | *Latest fix per device* | one point per ticked device |
 | | *Every fix in the time window* | one point per fix |
 | Save tracks | *Add a new track each save* | one line per device |
 | | *Keep only the most recent track* | replaces that device's earlier track (matched by `device_id`, or by the device-name field if there is no `device_id`) |
@@ -99,7 +99,7 @@ Settings are a list of short pages; changes apply immediately.
 | **Connection** | Server URL, email / username, password, *Test connection* |
 | **Layers** | Positions layer, device-name field, latest / every fix · Tracks layer, device-name field, add / keep most recent |
 | **Tag** | On/off, tag text, field, use the feature's display value |
-| **Advanced** | Refresh interval, grey-marker limit, the layer and fields used by *From feature* |
+| **Advanced** | Map button, location format (lat/long, degrees + minutes, Irish Grid, UK Grid, project CRS), refresh interval, grey-marker limit, the layer and fields used by *From feature* |
 
 The password is stored in QField's settings on the device, like other plugin settings.
 

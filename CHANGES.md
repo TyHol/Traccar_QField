@@ -4,6 +4,32 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.6 — Show / hide devices, colours, grid references
+
+Ported from the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) v0.3.0, kept simple.
+
+- **Tick a device to show or hide it.** Each row in the device list has a tick box. A hidden device
+  is left off the map and out of **Save positions** / **Save tracks**, and stays hidden next time
+  (`hiddenDevices`, by Traccar id). The *Devices* header is a tick box too: it shows "*n* of *m* shown"
+  and shows or hides them all.
+- **A colour per device.** Markers, labels, accuracy circles, tracks and the dot in the device list
+  use one colour per device, worked out from its name the same way as the QGIS plugin, so a device
+  has the same colour in both. Grey still means the last fix is older than the limit.
+- **Location formats.** Settings → Advanced → *Location*: Lat / long (default), Degrees + minutes
+  (`53° 21.900' N, 6° 18.600' W`), Irish Grid (`O 15904 34671`, EPSG:29903), UK Grid
+  (`NS 45140 72887`, EPSG:27700) or Project CRS (easting, northing to 0.1 m; lat / long if the project
+  CRS is geographic). Used under each device and by its copy button; a position outside the Irish or
+  UK grid falls back to lat / long. Same formats and grid letters as the QGIS plugin
+  (*Conversion_tools* uses the same grid letters). `locationFormat`: 0 lat / long, 1 Irish Grid,
+  2 UK Grid, 3 degrees + minutes, 4 project CRS.
+- **Tracks drawn more faithfully.** Before, a track over 1500 fixes was thinned evenly, which cut
+  corners. Now fixes within about 1 m of the previous one (a parked device) are dropped first, and
+  vertices less than a pixel apart on screen are skipped; a track is only thinned evenly if it is still
+  over 5000 points. Saving always uses every fix, as before.
+- Tests: 54 checks (was 39).
+
+---
+
 # v0.5 — Hide the map button, copy positions, icons that always show
 
 - **Show icon on canvas** — the plugin now has a settings icon in QField's Plugins list
