@@ -23,8 +23,6 @@ https://github.com/TyHol/Traccar_QField/releases/download/v0.6/traccar_qfield-v0
 
 **From a file** — download `traccar_qfield-v0.6.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
 
-**Upgrading from v0.4.1 or earlier, installed from a link?** Older zips were named without a hyphen, so QField kept each version as a separate plugin. Uninstall the old *Traccar Live* in QField's Plugins list, then install v0.6. From v0.5 on, new versions replace the installed one.
-
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 
 ## Getting started
