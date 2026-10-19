@@ -4,7 +4,7 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
-# v0.7.1 (in development) — Fits phone screens
+# v0.7.1 — Phones: fits the screen, tap to add, long-press to send
 
 - **Nothing spills off the right of the main window on a phone.** Buttons and tick boxes squeezed into a
   narrow row drew their text past the window's edge. On a phone, *Clear* and *Add* are now icon buttons,
