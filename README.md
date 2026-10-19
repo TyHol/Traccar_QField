@@ -2,6 +2,10 @@
 
 A [QField](https://qfield.org) plugin that shows your [Traccar](https://www.traccar.org) GPS devices on the map — live — and saves their positions and tracks into your project's layers when you ask it to.
 
+> **Not an official Traccar product.** Traccar Live is an independent, community-made plugin. It is not made, endorsed or supported by Traccar or its developers, and is not affiliated with them.
+>
+> [Traccar](https://www.traccar.org) is open-source GPS tracking software created by Anton Tananaev and its contributors. The Traccar name, the Traccar server, apps, API and documentation belong to their respective owners. This plugin only connects to a Traccar server that you have access to, using the interfaces Traccar publishes ([Traccar API](https://www.traccar.org/traccar-api/)). For Traccar itself (installation, apps and support), see [traccar.org](https://www.traccar.org).
+
 - **One time window for everything** — *Last 15 minutes … Last 3 months*, custom dates, or the start/end of a feature such as an incident. The tracks on the map are the fixes inside the window, and the Save buttons save exactly that.
 - **Live map overlay** — markers, name labels, GPS-accuracy circles and tracks, refreshed every few seconds. Nothing is written to your project until you tap Save.
 - **Two layers, saved on demand** — positions and tracks, into any point / line layers you choose.
@@ -24,8 +28,6 @@ https://github.com/TyHol/Traccar_QField/releases/download/v0.6/traccar_qfield-v0
 ```
 
 **From a file** — download `traccar_qfield-v0.6.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
-
-**Upgrading from v0.4.1 or earlier, installed from a link?** Older zips were named without a hyphen, so QField kept each version as a separate plugin. Uninstall the old *Traccar Live* in QField's Plugins list, then install v0.6. From v0.5 on, new versions replace the installed one.
 
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 
@@ -135,6 +137,10 @@ A companion QGIS desktop plugin, [Traccar_QGIS](https://github.com/TyHol/Traccar
 
 ## Credits
 By [TyHol](https://github.com/TyHol). Uses the [Traccar API](https://www.traccar.org/traccar-api/). Overlay feature inspired by OPENGIS.ch's [qfield-traccar](https://github.com/opengisch/qfield-traccar) plugin.
+
+Traccar — the GPS tracking server, apps, API and protocols this plugin works with — is created by Anton Tananaev and the Traccar contributors ([traccar.org](https://www.traccar.org), [GitHub](https://github.com/traccar/traccar)). All credit for Traccar goes to them; this plugin is not affiliated with or endorsed by Traccar.
+
+The icons in [`icons/`](icons) are Google's [Material Icons](https://fonts.google.com/icons), used under the [Apache License 2.0](icons/LICENSE-Apache-2.0.txt).
 
 ## Licence
 Copyright © 2026 TyHol. Released under the [GNU General Public License v2.0 or later](LICENSE) (GPL-2.0-or-later), the same licence as QField and QGIS.

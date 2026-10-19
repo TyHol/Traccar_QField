@@ -2769,6 +2769,18 @@ Item {
                     text: "Settings → Tag stamps a text such as FIRE-2026-001 onto everything you save. " +
                           "With 'From feature', the feature's display value can be used as the tag instead."
                 }
+
+                Label { text: "About"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "Not an official Traccar product. Traccar Live is an independent, community-made " +
+                          "plugin; it is not made, endorsed or supported by Traccar or its developers, and is not " +
+                          "affiliated with them.\n" +
+                          "Traccar (www.traccar.org) is open-source GPS tracking software created by Anton Tananaev " +
+                          "and its contributors — all credit for Traccar (the server, apps, API and documentation) " +
+                          "goes to them. This plugin only connects to a Traccar server you have access to, through " +
+                          "the interfaces Traccar publishes."
+                }
                 Item { height: 8 }
             }
         }
