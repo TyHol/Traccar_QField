@@ -1,5 +1,5 @@
 /**
- * Traccar Live – QField Plugin  v0.4
+ * Traccar Live – QField Plugin  v0.6
  *
  * One time window drives everything: the tracks drawn on the map are the fixes
  * inside the window, and "Save tracks" / "Save positions" write exactly what is
