@@ -1,5 +1,5 @@
 /**
- * Traccar Live – QField Plugin  v0.7
+ * Traccar Live – QField Plugin  v0.7.1
  *
  * One time window drives everything: the tracks drawn on the map are the fixes
  * inside the window, and "Save tracks" / "Save positions" write exactly what is
@@ -219,6 +219,8 @@ Item {
     component ShowBox: CheckBox {
         topPadding:      2
         bottomPadding:   2
+        leftPadding:     0
+        rightPadding:    6
         topInset:        0
         bottomInset:     0
         spacing:         4
@@ -1680,6 +1682,8 @@ Item {
                 }
                 Button {
                     text: "Clear"
+                    icon.source: "icons/clear.svg"
+                    display: plugin.phone ? AbstractButton.IconOnly : AbstractButton.TextOnly   // room for Live on a phone
                     enabled: plugin.win !== null
                     onClicked: { cfg.liveOn = false; clearWindow(); plugin.geofences = []; plugin.statusMsg = "" }
                 }
@@ -1687,6 +1691,7 @@ Item {
                     id: addButton
                     text: "Add"
                     icon.source: "icons/add.svg"
+                    display: plugin.phone ? AbstractButton.IconOnly : AbstractButton.TextBesideIcon
                     onClicked: addMenu.open()
                     Menu {
                         id: addMenu
@@ -1702,14 +1707,13 @@ Item {
             }
 
             // ── What to show ──────────────────────────────────────────────
-            RowLayout {                             // one row; Accuracy circles: Settings → Advanced
-                Layout.fillWidth: true
+            Flow {                                  // one row; wraps rather than squeezing on a narrow screen
+                Layout.fillWidth: true              // (Accuracy circles: Settings → Advanced)
                 spacing: 0
                 ShowBox { text: "Markers";   checked: cfg.showMarkers;   onToggled: cfg.showMarkers   = checked }
                 ShowBox { text: "Labels";    checked: cfg.showLabels;    onToggled: cfg.showLabels    = checked }
                 ShowBox { text: "Tracks";    checked: cfg.showTrails;    onToggled: cfg.showTrails    = checked }
                 ShowBox { text: "Geofences"; checked: cfg.showGeofences; onToggled: cfg.showGeofences = checked }
-                Item { Layout.fillWidth: true }
             }
 
             // ── Devices | Geofences tabs ──────────────────────────────────
@@ -2103,12 +2107,9 @@ Item {
         return out.join("  ·  ")
     }
 
-    component DetailsButton: ToolButton {
+    component DetailsButton: RowButton {     // an icon: not every phone font has "⋮"
         property string kind: "device"
-        text: "⋮"
-        font.pixelSize: 18
-        implicitWidth: 34
-        background: Item {}
+        icon.source: "icons/more.svg"
         onClicked: { detailsMenu.kind = kind; detailsMenu.open() }
     }
 

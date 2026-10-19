@@ -4,6 +4,18 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.7.1 (in development) — Fits phone screens
+
+- **Nothing spills off the right of the main window on a phone.** Buttons and tick boxes squeezed into a
+  narrow row drew their text past the window's edge. On a phone, *Clear* and *Add* are now icon buttons,
+  leaving room for *Live*; the Show row wraps instead of squeezing if it ever must.
+- **⋮** (choose the details a list shows) is now an icon — some phone fonts have no "⋮" character.
+- New icons `icons/clear.svg`, `icons/more.svg` (Material Icons).
+- Tests: the main window (both tabs), the send forms, *From layer* and every Settings page are checked at
+  phone width (360) with phone-sized text — nothing may stick out or be squeezed. 109 checks.
+
+---
+
 # v0.7 — Geofences, and adding / deleting in Traccar
 
 Same tools, form and rules as the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) 0.4.0:

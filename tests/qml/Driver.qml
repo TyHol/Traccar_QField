@@ -198,6 +198,37 @@ ApplicationWindow {
     function devTrack(id) { return plugin.tracks[String(id)] || [] }
     function lastOf(lyr) { return lyr._committed[lyr._committed.length - 1] }
 
+    // Visible items of a dialog that stick out past its content's left / right edge
+    function overflowing(dialog) {
+        var content = dialog.contentItem, w = content.width, out = []
+        function walk(item, depth) {
+            if (!item || !item.visible || depth > 40) return
+            var kids = item.children || []
+            for (var i = 0; i < kids.length; i++) {
+                var c = kids[i]
+                if (!c || !c.visible || c.width <= 0 || c.opacity === 0) continue
+                // what a person sees: controls and text (not Material's ripple / shadow effects)
+                var seen = c.text !== undefined || c.checked !== undefined || c.icon !== undefined
+                var p = c.mapToItem(content, 0, 0)
+                // squeezed: a button / check box narrower than its own text and icon draws past its edge
+                var wraps = c.contentItem && c.contentItem.wrapMode !== undefined && c.contentItem.wrapMode !== Text.NoWrap
+                var squeezed = seen && c.contentItem !== undefined && c.elide === undefined && !wraps
+                               && c.implicitWidth > c.width + 1
+                if (seen && (p.x + c.width > w + 1 || p.x < -1 || squeezed))
+                    out.push((c.text !== undefined && c.text !== "" ? "'" + c.text + "' " : "")
+                             + String(c).split("(")[0] + " x=" + Math.round(p.x) + " w=" + Math.round(c.width)
+                             + (squeezed ? " needs " + Math.round(c.implicitWidth) : "")
+                             + " (room " + Math.round(w) + ")")
+                else if (!seen || c.contentItem === undefined) walk(c, depth + 1)
+            }
+        }
+        walk(content, 0)
+        return out
+    }
+    function shot(item, name) {
+        if (shotDir !== "") item.grabToImage(function(r) { r.saveToFile(shotDir + "/" + name + ".png") })
+    }
+
     function startTests() {
         var comp = Qt.createComponent(mainQmlUrl)
         if (comp.status !== Component.Ready) { console.log("FAIL  load main.qml   → " + comp.errorString()); Qt.exit(2); return }
@@ -429,6 +460,83 @@ ApplicationWindow {
             // ── geofences from Traccar ──
             plugin.loadGeofences()
             waitFor("geofences load", function() { return plugin.geofences.length === 2 })
+        },
+        function() {
+            // ── phone width: nothing may stick out of the main window ──
+            L.wideW = root.width
+            L.font = root.font.pixelSize
+            root.width = 360
+            root.font.pixelSize = 17           // phone-sized text (Android, QField)
+            toolbarRow.children[0].clicked()
+            sleep(400)
+        },
+        function() {
+            var d = opened()[0]
+            var bad = overflowing(d)
+            check("phone width (360): Devices tab fits the window", plugin.phone && bad.length === 0, bad.join(" | "))
+            shot(d.contentChildren[0], "phone_devices")
+            L.tabBar = null
+            var find = function(it) { if (!it) return; if (String(it).indexOf("TabBar") === 0) L.tabBar = it
+                                      var k = it.children || []; for (var i = 0; i < k.length; i++) find(k[i]) }
+            find(d.contentItem)
+            L.tabBar.currentIndex = 1
+            sleep(300)
+        },
+        function() {
+            var d = opened()[0]
+            var bad = overflowing(d)
+            check("phone width (360): Geofences tab fits the window", bad.length === 0, bad.join(" | "))
+            shot(d.contentChildren[0], "phone_geofences")
+            L.tabBar.currentIndex = 0
+            d.close()
+            // the other screens at phone width too
+            plugin.editGeofence(8)                  // a line: description, corridor, speed, calendar, colour
+            sleep(300)
+        },
+        function() {
+            var bad = overflowing(sendDlg())
+            check("phone width: geofence form fits", bad.length === 0, bad.join(" | "))
+            sendDlg().close()
+            plugin.startDraw("point")
+            tap(-6.31, 53.36)
+            sleep(300)
+        },
+        function() {
+            var bad = overflowing(sendDlg())
+            check("phone width: point form fits", bad.length === 0, bad.join(" | "))
+            sendDlg().close()
+            plugin.cancelDraw()
+            var res = plugin.resources, layerDlg = null
+            for (var i = 0; i < res.length; i++) if (res[i].layerName !== undefined && res[i].geomType !== undefined) layerDlg = res[i]
+            L.layerDlg = layerDlg
+            layerDlg.open()
+            sleep(300)
+        },
+        function() {
+            var bad = overflowing(L.layerDlg)
+            check("phone width: From layer fits", bad.length === 0, bad.join(" | "))
+            L.layerDlg.close()
+            L.pages = ["", "connection", "layers", "tag", "advanced"]
+            L.badPages = []
+            sleep(200)
+        },
+        function() {
+            opened().forEach(function(o) { o.close() })
+            var page = L.pages.shift()
+            plugin.openSettings(page)
+            sleep(250)
+        },
+        function() {
+            var o = opened().filter(function(x) { return x.page !== undefined })[0]
+            var bad = overflowing(o)
+            if (bad.length) L.badPages.push((o.page || "list") + ": " + bad.join(", "))
+            o.close()
+            if (L.pages.length > 0) { stepIdx -= 2; return }   // next page
+            check("phone width: every Settings page fits", L.badPages.length === 0, L.badPages.join(" | "))
+            opened().forEach(function(x) { x.close() })
+            root.width = L.wideW
+            root.font.pixelSize = L.font
+            sleep(200)
         },
         function() {
             var lake = gf("Lake sector"), trail = gf("Trail")

@@ -30,6 +30,8 @@ except AttributeError:
 if os.environ.get("PYSIDE6_DIR"):
     sys.path.insert(0, os.environ["PYSIDE6_DIR"])
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+if os.name == "nt" and not os.environ.get("QT_QPA_FONTDIR"):     # real fonts, so text widths are real
+    os.environ["QT_QPA_FONTDIR"] = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
 os.environ["QT_QUICK_CONTROLS_STYLE"] = "Material"     # QField's style
 
 from PySide6.QtCore import (QCoreApplication, QSettings, QUrl, QMetaObject, QTimer,  # noqa: E402
@@ -202,6 +204,8 @@ ctx = engine.rootContext()
 ctx.setContextProperty("serverUrl", URL)
 ctx.setContextProperty("mainQmlUrl", QUrl.fromLocalFile(MAIN).toString())
 ctx.setContextProperty("vanStartIso", VAN_START.isoformat())
+ctx.setContextProperty("shotDir", os.environ.get("TRACCAR_SHOTS", ""))   # set to save phone-size screenshots
+
 # Device colour as the QGIS plugin Traccar Live makes it (MD5 of the name → hue)
 ctx.setContextProperty("phoneAColor", QColor.fromHsv(
     int(hashlib.md5(b"Phone A", usedforsecurity=False).hexdigest()[:4], 16) % 360, 190, 200).name())
