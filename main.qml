@@ -74,6 +74,8 @@ Item {
         property int    circleRadius:    500    // metres, for circles and points sent as geofences
         property string sendUrl:         ""     // OsmAnd endpoint for points; blank = http://<server host>:5055
         property string lastSendName:    ""     // name offered first when sending a point
+        property string deviceDetailsHidden:   ""   // detail lines left out of the device list ("speed,battery")
+        property string geofenceDetailsHidden: ""   // … and of the geofence list
 
         // Layers (written only on Save)
         property string pointsLayerName: ""
@@ -147,6 +149,8 @@ Item {
     property var    geofences:    []      // Traccar geofences: {id, name, area, mine, raw, color, kind, coords, radius}
     property string drawMode:     ""      // "" or what a map tap adds: "point", "circle", "area", "line"
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
+    property var    groups:       []      // Traccar groups and calendars, for the send form
+    property var    calendars:    []
 
     // Pending layer writes (held back while QFieldCloud is busy)
     property var    writeQueue:     []
@@ -903,6 +907,9 @@ Item {
     readonly property string defaultGfColor:  "#E65100"
     readonly property string sentPointPrefix: "qgis-"
     readonly property int    maxAreaChars:    4000      // Traccar keeps the area in a 4096-character column
+    readonly property var    deviceCategories: ["default", "animal", "bicycle", "boat", "bus", "camper", "car",
+        "crane", "helicopter", "motorcycle", "offroad", "person", "pickup", "plane", "scooter", "ship",
+        "tractor", "train", "tram", "trolleybus", "truck", "van"]       // Traccar's map icons
     readonly property var    swatches: ["#E65100", "#C62828", "#AD1457", "#6A1B9A", "#1565C0",
                                         "#00838F", "#2E7D32", "#F9A825", "#4E342E", "#424242"]
 
@@ -998,11 +1005,25 @@ Item {
                 out.push({ id: g.id, name: g.name || "", area: g.area || "", mine: attrs[geofenceMark] === true,
                            raw: g, color: _normColor(attrs.color) || defaultGfColor,
                            kind: parsed.kind, coords: c, radius: parsed.radius,
-                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0 })
+                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0,
+                           description: g.description || "",
+                           speedKmh: attrs.speedLimit ? Math.round(attrs.speedLimit * 1.852) : 0 })
             })
             out.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) })
             plugin.geofences = out
         }, function(msg) { console.log("Traccar Live: geofences: " + msg) })
+        // For the send form; an account without access just gets empty lists
+        var byName = function(a, b) { return String(a.name || "").toLowerCase().localeCompare(String(b.name || "").toLowerCase()) }
+        _get("/api/groups",    function(d) { plugin.groups    = (d || []).sort(byName) }, function() {})
+        _get("/api/calendars", function(d) { plugin.calendars = (d || []).sort(byName) }, function() {})
+    }
+
+    // Send-form values → the geofence fields besides name and area (as the QGIS plugin)
+    function geofenceExtra(v) {
+        var attrs = { color: v.color }
+        if (v.speedKmh > 0)  attrs.speedLimit = Math.round(v.speedKmh / 1.852 * 100) / 100   // Traccar: knots
+        if (v.corridorM > 0) attrs.polylineDistance = v.corridorM
+        return { description: v.description || "", calendarId: v.calendarId || 0, attributes: attrs }
     }
 
     // Where a polygon's name goes: its centroid (area-weighted), else the middle of its corners
@@ -1086,9 +1107,10 @@ Item {
         }, function(msg) { mainWindow.displayToast("Couldn't delete '" + info.name + "': " + msg) })
     }
 
-    // items: [{name, area}], all in one colour. A geofence sent from QGIS / QField before under
-    // the same name is replaced; anything else is added. done(added, replaced, errors) is optional.
-    function upsertGeofences(items, color, done) {
+    // items: [{name, area}], all in one colour, with extra fields from the send form
+    // ({description, calendarId, attributes}, optional). A geofence sent from QGIS / QField before
+    // under the same name is replaced; anything else is added. done(added, replaced, errors) is optional.
+    function upsertGeofences(items, color, extra, done) {
         if (items.length === 0) return
         _get("/api/geofences", function(existing) {
             var mine = {}
@@ -1110,17 +1132,19 @@ Item {
                 var ok  = function() { if (old) st.replaced++; else st.added++; finish() }
                 var bad = function(msg) { st.errors.push(it.name + ": " + msg); finish() }
                 var attrs = {}
+                var more  = (extra && extra.attributes) || {}
+                for (var k in more) attrs[k] = more[k]
                 attrs[geofenceMark] = true
                 attrs.color = color
-                if (old) {
-                    var body = JSON.parse(JSON.stringify(old))
-                    body.name = it.name; body.area = it.area
-                    body.attributes = body.attributes || {}
-                    for (var a in attrs) body.attributes[a] = attrs[a]
-                    _send("PUT", "/api/geofences/" + old.id, body, ok, bad)
-                } else {
-                    _send("POST", "/api/geofences", { name: it.name, area: it.area, attributes: attrs }, ok, bad)
-                }
+                var body = old ? JSON.parse(JSON.stringify(old)) : {}
+                body.name = it.name; body.area = it.area
+                if (extra && extra.description !== undefined) body.description = it.description || extra.description
+                else if (it.description) body.description = it.description
+                if (extra && extra.calendarId !== undefined) body.calendarId = extra.calendarId
+                body.attributes = body.attributes || {}
+                for (var a in attrs) body.attributes[a] = attrs[a]
+                if (old) _send("PUT", "/api/geofences/" + old.id, body, ok, bad)
+                else     _send("POST", "/api/geofences", body, ok, bad)
             })
         }, function(msg) { mainWindow.displayToast("Sending geofences needs your Traccar login: " + msg) })
     }
@@ -1137,7 +1161,8 @@ Item {
 
     // Send lat / lon as a fix of the device called name (time = now). An existing device
     // (by name or identifier) moves there; a new name adds a device with a qgis-… identifier.
-    function sendPoint(name, lon, lat, done) {
+    // details (optional, for a new device): {uniqueId, category, groupId, phone, model, contact}
+    function sendPoint(name, lon, lat, done, details) {
         var base = osmandUrl()
         if (base === "") { mainWindow.displayToast("Set up the connection first"); return }
         name = String(name).trim()
@@ -1170,8 +1195,12 @@ Item {
             })
             if (uid) { fix(uid); return }
             var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").substr(0, 30) || "point"
-            var newUid = sentPointPrefix + slug + "-" + t
-            _send("POST", "/api/devices", { name: name, uniqueId: newUid },
+            var dt = details || {}
+            var newUid = dt.uniqueId || (sentPointPrefix + slug + "-" + t)
+            var body = { name: name, uniqueId: newUid, category: dt.category || "default" }
+            if (dt.groupId) body.groupId = dt.groupId
+            ;["phone", "model", "contact"].forEach(function(k) { if (dt[k]) body[k] = dt[k] })
+            _send("POST", "/api/devices", body,
                   function(d) { fix((d && d.uniqueId) || newUid) },
                   function(msg) {
                       mainWindow.displayToast("Couldn't add '" + name + "' to Traccar (" + msg
@@ -1282,7 +1311,8 @@ Item {
 
     // Every feature of the layer (or only fid) → sent to Traccar.
     // asPoints: point features become points (devices) instead of circles.
-    function sendLayer(layerName, fid, nameField, fixedName, radius, color, asPoints) {
+    // descField (optional): field whose value becomes each geofence's description
+    function sendLayer(layerName, fid, nameField, fixedName, radius, color, asPoints, descField) {
         var lyr = _layerByName(layerName, "Send")
         if (!lyr) return
         var items = [], points = [], skipped = 0, n = 0
@@ -1298,6 +1328,11 @@ Item {
                     label = (v === null || v === undefined) ? "" : String(v).trim()
                 }
                 if (label === "") label = (fixedName || layerName) + (fid >= 0 ? "" : " " + n)
+                var desc = ""
+                if (descField) {
+                    var dv = f.attribute(descField)
+                    desc = (dv === null || dv === undefined) ? "" : String(dv).trim()
+                }
                 var parts = wktParts(_geomWkt(f.geometry), lyr.crs)
                 if (parts.length === 0) { skipped++; continue }
                 for (var j = 0; j < parts.length; j++) {
@@ -1305,7 +1340,7 @@ Item {
                     var nm = parts.length === 1 ? label : label + " (" + (j + 1) + ")"
                     if (p.kind === "point" && asPoints) { points.push({ name: nm, c: p.coords[0] }); continue }
                     var a = areaText(p.kind === "point" ? "circle" : p.kind, p.coords, radius)
-                    if (a) items.push({ name: nm, area: a.area })
+                    if (a) items.push({ name: nm, area: a.area, description: desc })
                     else   skipped++
                 }
             }
@@ -1632,185 +1667,227 @@ Item {
                 ShowBox { text: "Geofences"; checked: cfg.showGeofences; onToggled: cfg.showGeofences = checked }
             }
 
-            // ── Devices ───────────────────────────────────────────────────
-            RowLayout {
+            // ── Devices | Geofences tabs ──────────────────────────────────
+            TabBar {
+                id: listTabs
                 Layout.fillWidth: true
-                ShowBox {
-                    id: allDevicesBox
-                    property int nShown: plugin.deviceRows.filter(function(r) { return r.shown }).length
-                    Layout.fillWidth: true
-                    font.bold: true
-                    text: "Devices  (" + (nShown === plugin.deviceRows.length ? nShown
-                                          : nShown + " of " + plugin.deviceRows.length + " shown") + ")"
-                    enabled: plugin.deviceRows.length > 0
-                    checkState: nShown === 0 ? Qt.Unchecked
-                              : nShown === plugin.deviceRows.length ? Qt.Checked : Qt.PartiallyChecked
-                    nextCheckState: function() { return nShown === plugin.deviceRows.length ? Qt.Unchecked : Qt.Checked }
-                    onClicked: plugin.setAllShown(checkState === Qt.Checked)
+                TabButton {
+                    text: "Devices" + (plugin.deviceRows.length > 0 ? " (" + plugin.deviceRows.length + ")" : "")
                 }
-                Label {
-                    visible: plugin.lastFetched !== ""
-                    text: "updated " + plugin.lastFetched
-                    font.pixelSize: 11
-                    color: Theme.secondaryTextColor
+                TabButton {
+                    text: "Geofences" + (plugin.geofences.length > 0 ? " (" + plugin.geofences.length + ")" : "")
                 }
             }
-            ListView {
+            StackLayout {
                 Layout.fillWidth:  true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 60
-                clip:  true
-                model: plugin.deviceRows
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                Layout.minimumHeight: 100
+                currentIndex: listTabs.currentIndex
 
-                delegate: Rectangle {
-                    width:  ListView.view.width
-                    height: 56
-                    color:  index % 2 === 0 ? "#F5F5F5" : "white"
-                    property var row: modelData
-
+                // ── Devices ───────────────────────────────────────────────
+                ColumnLayout {
+                    spacing: 2
                     RowLayout {
-                        anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
-                        spacing: 4
+                        Layout.fillWidth: true
                         ShowBox {
-                            checked: row.shown
-                            onToggled: plugin.setDeviceShown(row.id, checked)
-                        }
-                        Rectangle {
-                            width: 10; height: 10; radius: 5
-                            color: row.color
-                            opacity: row.shown ? 1 : 0.4
-                        }
-                        ColumnLayout {
+                            id: allDevicesBox
+                            property int nShown: plugin.deviceRows.filter(function(r) { return r.shown }).length
                             Layout.fillWidth: true
-                            Layout.leftMargin: 4
-                            spacing: 1
-                            opacity: row.shown ? 1 : 0.5
-                            Label {
-                                text: row.name
-                                font.bold: true
-                                font.pixelSize: 14
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Label {
-                                text: row.line
-                                font.pixelSize: 11
-                                color: "#555"
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Label {
-                                visible: row.pos !== null
-                                text: { cfg.locationFormat; return row.pos ? _locationText(row.pos) : "" }
-                                font.pixelSize: 11
-                                color: "#1565C0"
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
+                            font.bold: true
+                            text: "Devices  (" + (nShown === plugin.deviceRows.length ? nShown
+                                                  : nShown + " of " + plugin.deviceRows.length + " shown") + ")"
+                            enabled: plugin.deviceRows.length > 0
+                            checkState: nShown === 0 ? Qt.Unchecked
+                                      : nShown === plugin.deviceRows.length ? Qt.Checked : Qt.PartiallyChecked
+                            nextCheckState: function() { return nShown === plugin.deviceRows.length ? Qt.Unchecked : Qt.Checked }
+                            onClicked: plugin.setAllShown(checkState === Qt.Checked)
                         }
-                        RowButton {
-                            visible: row.pos !== null
-                            icon.source: "icons/copy.svg"
-                            onClicked: {
-                                var loc = _locationText(row.pos)
-                                copyToClipboard(loc)
-                                mainWindow.displayToast(row.name + ": " + loc + " copied")
+                        Label {
+                            visible: plugin.lastFetched !== ""
+                            text: "updated " + plugin.lastFetched
+                            font.pixelSize: 11
+                            color: Theme.secondaryTextColor
+                        }
+                        DetailsButton { kind: "device" }
+                    }
+                    ListView {
+                        Layout.fillWidth:  true
+                        Layout.fillHeight: true
+                        clip:  true
+                        model: plugin.deviceRows
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                        delegate: Rectangle {
+                            width:  ListView.view.width
+                            height: Math.max(44, devCol.implicitHeight + 12)
+                            color:  index % 2 === 0 ? "#F5F5F5" : "white"
+                            property var row: modelData
+
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
+                                spacing: 4
+                                ShowBox {
+                                    checked: row.shown
+                                    onToggled: plugin.setDeviceShown(row.id, checked)
+                                }
+                                Rectangle {
+                                    width: 10; height: 10; radius: 5
+                                    color: row.color
+                                    opacity: row.shown ? 1 : 0.4
+                                }
+                                ColumnLayout {
+                                    id: devCol
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 4
+                                    spacing: 1
+                                    opacity: row.shown ? 1 : 0.5
+                                    Label {
+                                        text: row.name
+                                        font.bold: true
+                                        font.pixelSize: 14
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: plugin.deviceLine(row)
+                                        visible: text !== ""
+                                        font.pixelSize: 11
+                                        color: "#555"
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: row.pos !== null && plugin.detailShown("device", "location")
+                                        text: { cfg.locationFormat; return row.pos ? _locationText(row.pos) : "" }
+                                        font.pixelSize: 11
+                                        color: "#1565C0"
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                RowButton {
+                                    visible: row.pos !== null
+                                    icon.source: "icons/copy.svg"
+                                    onClicked: {
+                                        var loc = _locationText(row.pos)
+                                        copyToClipboard(loc)
+                                        mainWindow.displayToast(row.name + ": " + loc + " copied")
+                                    }
+                                }
+                                RowButton {
+                                    visible: row.pos !== null
+                                    icon.source: "icons/locate.svg"
+                                    onClicked: { zoomToDevice(row.pos); mainDialog.close() }
+                                }
+                                RowButton {
+                                    visible: row.sent             // only points added with Send point (qgis-…)
+                                    icon.source: "icons/delete.svg"
+                                    onClicked: plugin.confirm("Delete '" + row.name + "' from Traccar?\n\nIt disappears "
+                                                              + "for everyone, with all its positions. This can't be undone.",
+                                                              function() { plugin.deleteSentPoint(row.id) })
+                                }
                             }
-                        }
-                        RowButton {
-                            visible: row.pos !== null
-                            icon.source: "icons/locate.svg"
-                            onClicked: { zoomToDevice(row.pos); mainDialog.close() }
-                        }
-                        RowButton {
-                            visible: row.sent             // only points added with Send point (qgis-…)
-                            icon.source: "icons/delete.svg"
-                            onClicked: plugin.confirm("Delete '" + row.name + "' from Traccar?\n\nIt disappears "
-                                                      + "for everyone, with all its positions. This can't be undone.",
-                                                      function() { plugin.deleteSentPoint(row.id) })
                         }
                     }
                 }
-            }
 
-            // ── Geofences ─────────────────────────────────────────────────
-            ShowBox {
-                id: allGeofencesBox
-                visible: plugin.geofences.length > 0
-                enabled: cfg.showGeofences
-                property int nShown: { var h = plugin._gfHiddenIds()
-                                       return plugin.geofences.filter(function(g) { return !h[String(g.id)] }).length }
-                Layout.fillWidth: true
-                font.bold: true
-                text: "Geofences  (" + (nShown === plugin.geofences.length ? nShown
-                                        : nShown + " of " + plugin.geofences.length + " shown") + ")"
-                checkState: nShown === 0 ? Qt.Unchecked
-                          : nShown === plugin.geofences.length ? Qt.Checked : Qt.PartiallyChecked
-                nextCheckState: function() { return nShown === plugin.geofences.length ? Qt.Unchecked : Qt.Checked }
-                onClicked: plugin.setAllGeofencesShown(checkState === Qt.Checked)
-            }
-            ListView {
-                id: geofenceList
-                visible: plugin.geofences.length > 0
-                enabled: cfg.showGeofences
-                Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(contentHeight, 152)
-                clip:  true
-                model: plugin.geofences
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                delegate: Rectangle {
-                    width:  ListView.view.width
-                    height: 48
-                    color:  index % 2 === 0 ? "#F5F5F5" : "white"
-                    property var g: modelData
-                    property bool shown: { cfg.hiddenGeofences; return !plugin._gfHiddenIds()[String(g.id)] }
-
+                // ── Geofences ─────────────────────────────────────────────
+                ColumnLayout {
+                    spacing: 2
                     RowLayout {
-                        anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
-                        spacing: 4
+                        Layout.fillWidth: true
                         ShowBox {
-                            checked: shown
-                            onToggled: plugin.setGeofenceShown(g.id, checked)
-                        }
-                        Rectangle {                         // tap: change the colour
-                            width: 18; height: 18; radius: 4
-                            color: g.color
-                            opacity: shown ? 1 : 0.4
-                            MouseArea { anchors.fill: parent; anchors.margins: -8; onClicked: colorMenu.openFor(g) }
-                        }
-                        ColumnLayout {
+                            id: allGeofencesBox
+                            enabled: cfg.showGeofences && plugin.geofences.length > 0
+                            property int nShown: { var h = plugin._gfHiddenIds()
+                                                   return plugin.geofences.filter(function(g) { return !h[String(g.id)] }).length }
                             Layout.fillWidth: true
-                            Layout.leftMargin: 4
-                            spacing: 1
-                            opacity: shown ? 1 : 0.5
-                            Label {
-                                text: g.name || "(no name)"
-                                font.bold: true
-                                font.pixelSize: 14
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                            Label {
-                                text: plugin.geofenceType(g) + "  ·  from " + (g.mine ? "QGIS / QField" : "Traccar")
-                                font.pixelSize: 11
-                                color: "#555"
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
+                            font.bold: true
+                            text: "Geofences  (" + (nShown === plugin.geofences.length ? nShown
+                                                    : nShown + " of " + plugin.geofences.length + " shown") + ")"
+                            checkState: nShown === 0 ? Qt.Unchecked
+                                      : nShown === plugin.geofences.length ? Qt.Checked : Qt.PartiallyChecked
+                            nextCheckState: function() { return nShown === plugin.geofences.length ? Qt.Unchecked : Qt.Checked }
+                            onClicked: plugin.setAllGeofencesShown(checkState === Qt.Checked)
                         }
-                        RowButton {
-                            icon.source: "icons/locate.svg"
-                            onClicked: { plugin.zoomToGeofence(g.id); mainDialog.close() }
-                        }
-                        RowButton {
-                            icon.source: "icons/delete.svg"
-                            onClicked: plugin.confirm("Delete the geofence '" + g.name + "' from Traccar?\n\n"
-                                                      + (g.mine ? "" : "It was made in Traccar, not sent from QGIS or "
-                                                                       + "QField — Traccar alerts may use it.\n\n")
-                                                      + "It disappears for everyone. This can't be undone.",
-                                                      function() { plugin.deleteGeofence(g.id) })
+                        DetailsButton { kind: "geofence" }
+                    }
+                    Hint {
+                        visible: plugin.geofences.length === 0
+                        text: "No geofences in Traccar yet — add one with Area, Line or Circle below."
+                    }
+                    ListView {
+                        id: geofenceList
+                        enabled: cfg.showGeofences
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip:  true
+                        model: plugin.geofences
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                        delegate: Rectangle {
+                            width:  ListView.view.width
+                            height: Math.max(44, gfCol.implicitHeight + 12)
+                            color:  index % 2 === 0 ? "#F5F5F5" : "white"
+                            property var g: modelData
+                            property bool shown: { cfg.hiddenGeofences; return !plugin._gfHiddenIds()[String(g.id)] }
+
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
+                                spacing: 4
+                                ShowBox {
+                                    checked: shown
+                                    onToggled: plugin.setGeofenceShown(g.id, checked)
+                                }
+                                Rectangle {                         // tap: change the colour
+                                    width: 18; height: 18; radius: 4
+                                    color: g.color
+                                    opacity: shown ? 1 : 0.4
+                                    MouseArea { anchors.fill: parent; anchors.margins: -8; onClicked: colorMenu.openFor(g) }
+                                }
+                                ColumnLayout {
+                                    id: gfCol
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 4
+                                    spacing: 1
+                                    opacity: shown ? 1 : 0.5
+                                    Label {
+                                        text: g.name || "(no name)"
+                                        font.bold: true
+                                        font.pixelSize: 14
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: plugin.geofenceLine(g)
+                                        visible: text !== ""
+                                        font.pixelSize: 11
+                                        color: "#555"
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        visible: g.description !== "" && plugin.detailShown("geofence", "description")
+                                        text: g.description
+                                        font.pixelSize: 11
+                                        color: "#1565C0"
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                RowButton {
+                                    icon.source: "icons/locate.svg"
+                                    onClicked: { plugin.zoomToGeofence(g.id); mainDialog.close() }
+                                }
+                                RowButton {
+                                    icon.source: "icons/delete.svg"
+                                    onClicked: plugin.confirm("Delete the geofence '" + g.name + "' from Traccar?\n\n"
+                                                              + (g.mine ? "" : "It was made in Traccar, not sent from QGIS or "
+                                                                               + "QField — Traccar alerts may use it.\n\n")
+                                                              + "It disappears for everyone. This can't be undone.",
+                                                              function() { plugin.deleteGeofence(g.id) })
+                                }
+                            }
                         }
                     }
                 }
@@ -1954,6 +2031,79 @@ Item {
         }
     }
 
+    // ── Detail lines in the lists: chosen with ⋮ (remembered) ────────────
+    readonly property var detailChoices: ({
+        device:   [{ key: "fixes", label: "Fixes and time span" }, { key: "speed", label: "Speed" },
+                   { key: "battery", label: "Battery" }, { key: "location", label: "Location" }],
+        geofence: [{ key: "type", label: "Type" }, { key: "from", label: "Made in" },
+                   { key: "speed", label: "Speed limit" }, { key: "description", label: "Description" }]
+    })
+
+    function detailShown(kind, key) {
+        var hidden = kind === "device" ? cfg.deviceDetailsHidden : cfg.geofenceDetailsHidden
+        return hidden.split(",").indexOf(key) < 0
+    }
+
+    function setDetailShown(kind, key, on) {
+        var list = (kind === "device" ? cfg.deviceDetailsHidden : cfg.geofenceDetailsHidden)
+                   .split(",").filter(function(k) { return k !== "" && k !== key })
+        if (!on) list.push(key)
+        if (kind === "device") cfg.deviceDetailsHidden = list.join(",")
+        else                   cfg.geofenceDetailsHidden = list.join(",")
+    }
+
+    function deviceLine(row) {
+        cfg.deviceDetailsHidden
+        var p = row.parts || {}, out = []
+        if (detailShown("device", "fixes") && p.fixes)     out.push(p.fixes)
+        if (detailShown("device", "speed") && p.speed)     out.push(p.speed)
+        if (detailShown("device", "battery") && p.battery) out.push(p.battery)
+        return out.join("  ·  ")
+    }
+
+    function geofenceLine(g) {
+        cfg.geofenceDetailsHidden
+        var out = []
+        if (detailShown("geofence", "type")) out.push(geofenceType(g))
+        if (detailShown("geofence", "from")) out.push("from " + (g.mine ? "QGIS / QField" : "Traccar"))
+        if (detailShown("geofence", "speed") && g.speedKmh) out.push("limit " + g.speedKmh + " km/h")
+        return out.join("  ·  ")
+    }
+
+    component DetailsButton: ToolButton {
+        property string kind: "device"
+        text: "⋮"
+        font.pixelSize: 18
+        implicitWidth: 34
+        background: Item {}
+        onClicked: { detailsMenu.kind = kind; detailsMenu.open() }
+    }
+
+    Popup {
+        id: detailsMenu
+        parent: mainWindow.contentItem
+        modal:  true
+        padding: 10
+        x: (mainWindow.width - width) / 2
+        y: (mainWindow.height - height) / 2
+        z: 10
+        background: DialogBackground {}
+        property string kind: "device"
+        ColumnLayout {
+            spacing: 0
+            Label { text: "Show in the list"; font.bold: true; Layout.bottomMargin: 4 }
+            Repeater {
+                model: plugin.detailChoices[detailsMenu.kind]
+                delegate: CheckBox {
+                    text: modelData.label
+                    checked: { cfg.deviceDetailsHidden; cfg.geofenceDetailsHidden
+                               return plugin.detailShown(detailsMenu.kind, modelData.key) }
+                    onToggled: plugin.setDetailShown(detailsMenu.kind, modelData.key, checked)
+                }
+            }
+        }
+    }
+
     // Tap a geofence's colour in the list → pick another (saved in Traccar)
     Popup {
         id: colorMenu
@@ -2058,7 +2208,7 @@ Item {
         }
     }
 
-    // ── Name (and radius / colour), then send ─────────────────────────────
+    // ── Name and Traccar's fields, then send (same form as the QGIS plugin) ──
     Dialog {
         id:      sendDialog
         background: DialogBackground {}
@@ -2066,19 +2216,31 @@ Item {
         visible: false
         modal:   true
         padding: 12
-        width:   Math.min(mainWindow.width * 0.93, 400)
+        width:   Math.min(mainWindow.width * 0.93, 420)
+        height:  Math.min(mainWindow.height - plugin.topInset - plugin.bottomInset - 24, sendCol.implicitHeight + 90)
         x:       (mainWindow.width - width) / 2
         y:       plugin.topInset + 12
         property string mode: "point"     // point, circle, area, line
         property var    coords: []
         property bool   sent: false
-        property alias  nameText: sendName.text
+        property alias  nameText:        sendName.text
+        property alias  descriptionText: sendDescription.text
+        property alias  speedValue:      sendSpeed.value
+        property alias  corridorValue:   sendCorridor.value
+        property alias  calendarIndex:   sendCalendar.currentIndex
+        property alias  uidText:         sendUid.text
+        property alias  categoryIndex:   sendCategory.currentIndex
+        property alias  groupIndex:      sendGroup.currentIndex
+        property alias  phoneText:       sendPhone.text
+        property alias  modelText:       sendModel.text
+        property alias  contactText:     sendContact.text
+        readonly property bool point: mode === "point"
 
         header: HeaderBar {
             RowLayout {
                 anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
                 Label {
-                    text: sendDialog.mode === "point" ? "Send point" : "Send "
+                    text: sendDialog.point ? "Send point" : "Send "
                           + ({ circle: "circle", area: "area", line: "line" })[sendDialog.mode] + " as a geofence"
                     color: "white"; font.pixelSize: 17; font.bold: true
                     Layout.fillWidth: true
@@ -2089,8 +2251,12 @@ Item {
 
         onOpened: {
             sent = false
-            sendName.text = mode === "point" ? cfg.lastSendName : ""
+            sendName.text = point ? cfg.lastSendName : ""
             sendRadius.value = cfg.circleRadius
+            sendDescription.text = ""; sendSpeed.value = 0; sendCorridor.value = 0; sendCalendar.currentIndex = 0
+            sendUid.text = ""; sendCategory.currentIndex = 0; sendGroup.currentIndex = 0
+            sendPhone.text = ""; sendModel.text = ""; sendContact.text = ""
+            sendScroll.ScrollBar.vertical.position = 0
             sendName.forceActiveFocus()
         }
         // Closed without sending (Cancel / ✕): back to drawing — tap again, or the corners kept
@@ -2099,73 +2265,153 @@ Item {
         function send() {
             var name = sendName.text.trim()
             if (name === "") { mainWindow.displayToast("Give it a name first"); return }
-            if (mode === "point") {
+            if (point) {
                 cfg.lastSendName = name
-                plugin.sendPoint(name, coords[0].lon, coords[0].lat)
+                plugin.sendPoint(name, coords[0].lon, coords[0].lat, null, {
+                    uniqueId: sendUid.text.trim(), category: plugin.deviceCategories[sendCategory.currentIndex],
+                    groupId: sendGroup.currentIndex > 0 ? plugin.groups[sendGroup.currentIndex - 1].id : 0,
+                    phone: sendPhone.text.trim(), model: sendModel.text.trim(), contact: sendContact.text.trim() })
             } else {
                 cfg.circleRadius = sendRadius.value
                 var a = plugin.areaText(mode === "area" ? "polygon" : mode, coords, sendRadius.value)
                 if (!a) { mainWindow.displayToast("Not enough corners"); return }
-                plugin.upsertGeofences([{ name: name, area: a.area }], cfg.geofenceColor)
+                plugin.upsertGeofences([{ name: name, area: a.area }], cfg.geofenceColor, plugin.geofenceExtra({
+                    color: cfg.geofenceColor, description: sendDescription.text.trim(), speedKmh: sendSpeed.value,
+                    corridorM: mode === "line" ? sendCorridor.value : 0,
+                    calendarId: sendCalendar.currentIndex > 0 ? plugin.calendars[sendCalendar.currentIndex - 1].id : 0 }))
             }
             sent = true
             plugin.cancelDraw()
             close()
         }
 
-        ColumnLayout {
-            width: parent.width
-            spacing: 6
-            Hint {
-                text: sendDialog.coords.length === 0 ? ""
-                      : sendDialog.mode === "point" || sendDialog.mode === "circle"
-                        ? (sendDialog.mode === "circle" ? "Centre: " : "At: ")
-                          + plugin._locationText({ latitude: sendDialog.coords[0].lat, longitude: sendDialog.coords[0].lon })
-                        : sendDialog.coords.length + " corners"
-            }
-            Label { text: "Name" }
-            TextField {
-                id: sendName
-                Layout.fillWidth: true
-                placeholderText: sendDialog.mode === "point" ? "e.g. Team 2 or Clue 4" : "e.g. Sector A"
-                onAccepted: sendDialog.send()
-            }
-            Hint {
-                visible: sendDialog.mode === "point"
-                text: "A new name adds a new point (device) in Traccar; the name of an existing device moves it here."
-            }
-            Hint {
-                visible: sendDialog.mode !== "point"
-                text: "A geofence sent from QGIS or QField before with the same name is replaced."
-            }
-            RowLayout {
-                visible: sendDialog.mode === "circle"
-                Layout.fillWidth: true
-                Label { text: "Radius" }
-                SpinBox {
-                    id: sendRadius
-                    from: 10; to: 100000; stepSize: 50; editable: true
+        ScrollView {
+            id: sendScroll
+            anchors.fill: parent
+            contentWidth: availableWidth
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            ColumnLayout {
+                id: sendCol
+                width: sendScroll.availableWidth
+                spacing: 6
+                Hint {
+                    text: sendDialog.coords.length === 0 ? ""
+                          : sendDialog.mode === "point" || sendDialog.mode === "circle"
+                            ? (sendDialog.mode === "circle" ? "Centre: " : "At: ")
+                              + plugin._locationText({ latitude: sendDialog.coords[0].lat, longitude: sendDialog.coords[0].lon })
+                            : sendDialog.coords.length + " corners"
+                }
+                Label { text: "Name" }
+                TextField {
+                    id: sendName
                     Layout.fillWidth: true
+                    placeholderText: sendDialog.point ? "e.g. Team 2 or Clue 4" : "e.g. Sector A"
+                    onAccepted: sendDialog.send()
                 }
-                Label { text: "m" }
-            }
-            Flow {
-                visible: sendDialog.mode === "circle"
-                Layout.fillWidth: true
-                spacing: 4
-                Repeater {
-                    model: [250, 500, 1000]
-                    delegate: Button { text: modelData + " m"; flat: true; onClicked: sendRadius.value = modelData }
+                Hint {
+                    visible: sendDialog.point
+                    text: "A new name adds a new point (device) in Traccar; the name of an existing device moves it here. "
+                          + "The details below are for a new point."
                 }
-            }
-            Label { visible: sendDialog.mode !== "point"; text: "Colour" }
-            SwatchRow { visible: sendDialog.mode !== "point" }
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.topMargin: 6
-                Item { Layout.fillWidth: true }
-                Button { text: "Cancel"; flat: true; onClicked: sendDialog.close() }
-                Button { text: "Send to Traccar"; onClicked: sendDialog.send() }
+                Hint {
+                    visible: !sendDialog.point
+                    text: "A geofence sent from QGIS or QField before with the same name is replaced."
+                }
+
+                // ── A new point (device) ──
+                GridLayout {
+                    visible: sendDialog.point
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: 8
+                    Label { text: "Identifier" }
+                    TextField { id: sendUid; Layout.fillWidth: true; placeholderText: "made from the name (qgis-…)"
+                                inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText }
+                    Label { text: "Category" }
+                    ComboBox {
+                        id: sendCategory
+                        Layout.fillWidth: true
+                        model: plugin.deviceCategories.map(function(c) { return c.charAt(0).toUpperCase() + c.substr(1) })
+                    }
+                    Label { text: "Group" }
+                    ComboBox {
+                        id: sendGroup
+                        Layout.fillWidth: true
+                        model: ["— none —"].concat(plugin.groups.map(function(g) { return g.name || String(g.id) }))
+                    }
+                    Label { text: "Phone" }
+                    TextField { id: sendPhone; Layout.fillWidth: true; inputMethodHints: Qt.ImhDialableCharactersOnly }
+                    Label { text: "Model" }
+                    TextField { id: sendModel; Layout.fillWidth: true }
+                    Label { text: "Contact" }
+                    TextField { id: sendContact; Layout.fillWidth: true }
+                }
+
+                // ── A geofence ──
+                GridLayout {
+                    visible: !sendDialog.point
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: 8
+                    Label { text: "Description" }
+                    TextField { id: sendDescription; Layout.fillWidth: true }
+                    Label { visible: sendDialog.mode === "circle"; text: "Radius (m)" }
+                    SpinBox {
+                        id: sendRadius
+                        visible: sendDialog.mode === "circle"
+                        from: 10; to: 100000; stepSize: 50; editable: true
+                        Layout.fillWidth: true
+                    }
+                    Item { visible: sendDialog.mode === "circle"; width: 1; height: 1 }
+                    Flow {
+                        visible: sendDialog.mode === "circle"
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Repeater {
+                            model: [250, 500, 1000]
+                            delegate: Button { text: modelData + " m"; flat: true; onClicked: sendRadius.value = modelData }
+                        }
+                    }
+                    Label { visible: sendDialog.mode === "line"; text: "Corridor (m)" }
+                    SpinBox {
+                        id: sendCorridor
+                        visible: sendDialog.mode === "line"
+                        from: 0; to: 10000; stepSize: 5; editable: true
+                        Layout.fillWidth: true
+                        textFromValue: function(v) { return v === 0 ? "default" : String(v) }
+                        valueFromText: function(t) { var n = parseInt(t); return isNaN(n) ? 0 : n }
+                    }
+                    Label { text: "Speed limit (km/h)" }
+                    SpinBox {
+                        id: sendSpeed
+                        from: 0; to: 1000; stepSize: 5; editable: true
+                        Layout.fillWidth: true
+                        textFromValue: function(v) { return v === 0 ? "none" : String(v) }
+                        valueFromText: function(t) { var n = parseInt(t); return isNaN(n) ? 0 : n }
+                    }
+                    Label { text: "Calendar" }
+                    ComboBox {
+                        id: sendCalendar
+                        Layout.fillWidth: true
+                        model: ["— always active —"].concat(plugin.calendars.map(function(c) { return c.name || String(c.id) }))
+                    }
+                }
+                Hint {
+                    visible: !sendDialog.point
+                    text: (sendDialog.mode === "line" ? "Corridor: how close to the line a device must be to count as on it. " : "")
+                          + "Speed limit: Traccar warns when a device goes faster inside. Calendar: active only at those times."
+                }
+                Label { visible: !sendDialog.point; text: "Colour" }
+                SwatchRow { visible: !sendDialog.point }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 6
+                    Item { Layout.fillWidth: true }
+                    Button { text: "Cancel"; flat: true; onClicked: sendDialog.close() }
+                    Button { text: "Send to Traccar"; onClicked: sendDialog.send() }
+                }
             }
         }
     }
@@ -2228,6 +2474,7 @@ Item {
             var fn = layers.length > 0 ? layers[0].fields.names : []
             var guess = ["name", "title", "sector", "sector_id", "incident_ref"]
             sendFieldCombo.currentIndex = 0
+            sendDescCombo.currentIndex = 0
             for (var i = 0; i < guess.length && sendFieldCombo.currentIndex === 0; i++)
                 if (fn.indexOf(guess[i]) >= 0) restoreSelection(sendFieldCombo, sendFieldModel, guess[i])
             if (sendFieldCombo.currentIndex < 0) sendFieldCombo.currentIndex = 0
@@ -2278,6 +2525,11 @@ Item {
                 }
                 Label { text: "… or name (numbered if several)" }
                 TextField { id: sendLayerName; Layout.fillWidth: true; placeholderText: "the layer's name" }
+                Label { text: "Description from field" }
+                PickCombo {
+                    id: sendDescCombo
+                    model: sendFieldModel
+                }
                 Label { text: "Features" }
                 ComboBox {
                     id: sendFeatureCombo
@@ -2311,7 +2563,7 @@ Item {
                         var fid = sendFeatureCombo.currentIndex > 0 ? sendFeatureModel.get(sendFeatureCombo.currentIndex).fid : -1
                         plugin.sendLayer(layerSendDialog.layerName, fid, pickedName(sendFieldCombo, sendFieldModel),
                                          sendLayerName.text.trim(), sendLayerRadius.value, cfg.geofenceColor,
-                                         pt && asPoints.checked)
+                                         pt && asPoints.checked, pickedName(sendDescCombo, sendFieldModel))
                         layerSendDialog.close()
                     }
                 }
@@ -2407,13 +2659,16 @@ Item {
                     color: Theme.mainTextColor
                     text: "Traccar's geofences (areas, lines, circles) are drawn on the map in their own colour, " +
                           "with their names — they never go grey. Tick Geofences under Show to switch them all on " +
-                          "or off; in the Geofences list, untick one to hide it, tap its colour to change it " +
+                          "or off; in the Geofences tab, untick one to hide it, tap its colour to change it " +
                           "(saved in Traccar), the target to centre the map on it, or the bin to delete it from " +
-                          "Traccar (you're asked first).\n" +
+                          "Traccar (you're asked first). ⋮ on either tab chooses which details its list shows.\n" +
                           "Add → Point / Circle: tap the map (or 'My location'), give a name. A point becomes a " +
-                          "device in Traccar — a new name adds one, an existing device's name moves it there. " +
+                          "device in Traccar — a new name adds one, an existing device's name moves it there; for a " +
+                          "new one you can set its identifier, category (icon), group, phone, model and contact. " +
                           "Points added this way can be deleted from the device list.\n" +
-                          "Add → Area / Line: tap each corner, then Done, name it and pick a colour.\n" +
+                          "Add → Area / Line: tap each corner, then Done. Geofences get a name, description, speed " +
+                          "limit (Traccar warns when a device goes faster inside), corridor width for a line, a " +
+                          "Traccar calendar (active only at those times) and a colour.\n" +
                           "Add → From layer: send a layer's features (all or one), named from a field — areas and " +
                           "lines become geofences, points become circles or points.\n" +
                           "Sending a geofence with the same name as one sent from QGIS or QField before replaces " +
@@ -3221,12 +3476,17 @@ Item {
                   + (tr.length > 1 ? _spanText(tr[0].fixTime, tr[tr.length - 1].fixTime)
                                    : _fmtLocal(tr[0].fixTime))
                 : "no fixes in window"
+            var parts = { fixes: line, speed: "", battery: "" }
             if (pos) {
-                line += "  ·  " + Math.round((pos.speed || 0) * 1.852) + " km/h"
+                parts.speed = Math.round((pos.speed || 0) * 1.852) + " km/h"
+                line += "  ·  " + parts.speed
                 var a = pos.attributes || {}
-                if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  batt " + a.batteryLevel + "%"
+                if (a.batteryLevel !== undefined && a.batteryLevel !== null) {
+                    parts.battery = "batt " + a.batteryLevel + "%"
+                    line += "  ·  " + parts.battery
+                }
             }
-            rows.push({ id: key, name: dname, line: line, pos: pos, shown: !hidden[key],
+            rows.push({ id: key, name: dname, line: line, parts: parts, pos: pos, shown: !hidden[key],
                         color: pos ? colorOf(key, pos.fixTime) : "#9E9E9E",
                         sent: String(plugin.deviceInfo[devId].uniqueId || "").indexOf(sentPointPrefix) === 0 })
         }

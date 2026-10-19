@@ -6,6 +6,17 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 # Unreleased — Geofences, and adding / deleting in Traccar
 
+### Same send form and lists as the QGIS plugin
+- **The send form shows Traccar's fields.** Geofences: description, speed limit (km/h, saved in knots
+  as `speedLimit`), corridor width for lines (`polylineDistance`), calendar (`calendarId`) and the
+  colour swatches. New points (devices): identifier, category (map icon), group, phone, model, contact.
+  Groups and calendars are read from Traccar; the form scrolls on small screens.
+- **From layer** can take each geofence's description from a field.
+- **Devices and Geofences in tabs** (with counts). **⋮** on each tab chooses which detail lines its
+  list shows — devices: fixes and time span, speed, battery, location; geofences: type, made in,
+  speed limit, description (remembered: `deviceDetailsHidden`, `geofenceDetailsHidden`).
+- Tests: 99 checks; the fake server also serves groups and calendars.
+
 Matches the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) (branch
 `send-point-geofences`): same geofence marker, same `qgis-…` identifiers, same colour attribute.
 

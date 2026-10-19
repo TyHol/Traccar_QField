@@ -104,8 +104,7 @@ class Handler(BaseHTTPRequestHandler):
             GEOFENCES.append(g)
             return self._send(200, g)
         if self.path == "/api/devices":
-            d = {"id": max(d["id"] for d in DEVICES) + 1, "name": body["name"], "uniqueId": body["uniqueId"],
-                 "status": "unknown"}
+            d = dict(body, id=max(d["id"] for d in DEVICES) + 1, status="unknown")
             DEVICES.append(d)
             POS[d["id"]] = []
             return self._send(200, d)
@@ -159,6 +158,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/api/geofences":
             return self._send(200, GEOFENCES)
+        if u.path == "/api/groups":
+            return self._send(200, [{"id": 4, "name": "Search teams"}])
+        if u.path == "/api/calendars":
+            return self._send(200, [{"id": 9, "name": "Operation hours"}])
         if u.path == "/api/devices":
             return self._send(200, DEVICES)
         if u.path == "/api/positions" and "deviceId" in q:

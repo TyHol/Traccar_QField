@@ -623,6 +623,82 @@ ApplicationWindow {
             sleep(200)
         },
         function() {
+            // ── the send form's Traccar fields (same as the QGIS plugin) ──
+            check("groups and calendars loaded for the send form",
+                  plugin.groups.length === 1 && plugin.groups[0].name === "Search teams"
+                  && plugin.calendars.length === 1 && plugin.calendars[0].id === 9)
+            plugin.startDraw("line")
+            tap(-6.30, 53.35); tap(-6.29, 53.355)
+            plugin.finishDraw()
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("line form", d && d.mode === "line")
+            d.nameText = "Track 3"; d.descriptionText = "Main track"
+            d.corridorValue = 40; d.speedValue = 20; d.calendarIndex = 1
+            d.send()
+            waitFor("line sent", function() { return gf("Track 3") !== undefined })
+        },
+        function() { fetchState() },
+        function() {
+            var t = serverState.geofences.filter(function(g) { return g.name === "Track 3" })[0]
+            check("line sent with description, calendar, speed limit (knots) and corridor width",
+                  t && t.description === "Main track" && t.calendarId === 9 && t.attributes.speedLimit === 10.8
+                  && t.attributes.polylineDistance === 40 && t.area.indexOf("LINESTRING") === 0, JSON.stringify(t))
+            check("speed limit read back in km/h", gf("Track 3").speedKmh === 20 && gf("Track 3").description === "Main track")
+            plugin.startDraw("point")
+            tap(-6.305, 53.358)
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            d.nameText = "Clue 7"
+            d.categoryIndex = plugin.deviceCategories.indexOf("person")
+            d.groupIndex = 1
+            d.phoneText = "087 000"; d.contactText = "Team 2"
+            d.send()
+            waitFor("point with details sent", function() { return toasts[toasts.length - 1].indexOf("Clue 7") >= 0 })
+        },
+        function() { fetchState() },
+        function() {
+            var dev = serverState.devices.filter(function(x) { return x.name === "Clue 7" })[0]
+            check("new point sent with category, group, phone and contact",
+                  dev && dev.category === "person" && dev.groupId === 4 && dev.phone === "087 000"
+                  && dev.contact === "Team 2" && dev.uniqueId.indexOf("qgis-clue-7-") === 0, JSON.stringify(dev))
+            // ── detail lines in the lists ──
+            plugin.reloadWindow()
+            waitFor("reload", function() { return !plugin.loading })
+        },
+        function() {
+            var row = plugin.deviceRows.filter(function(r) { return r.name === "Phone A" })[0]
+            var full = plugin.deviceLine(row)
+            plugin.setDetailShown("device", "speed", false)
+            plugin.setDetailShown("device", "battery", false)
+            var short = plugin.deviceLine(row)
+            check("hide Speed and Battery from the device list (remembered)",
+                  full.indexOf("km/h") > 0 && full.indexOf("batt") > 0 && short.indexOf("km/h") < 0
+                  && short.indexOf("batt") < 0 && short.indexOf("fix") > 0 && cfg.deviceDetailsHidden === "speed,battery",
+                  full + " | " + short + " | " + cfg.deviceDetailsHidden)
+            plugin.setDetailShown("geofence", "type", false)
+            check("hide Type from the geofence list", plugin.geofenceLine(gf("Track 3")) === "from QGIS / QField  ·  limit 20 km/h",
+                  plugin.geofenceLine(gf("Track 3")))
+            toolbarRow.children[0].clicked()        // draw the tabs with details hidden
+            sleep(200)
+        },
+        function() {
+            opened()[0].close()
+            plugin.setDetailShown("device", "speed", true); plugin.setDetailShown("device", "battery", true)
+            plugin.setDetailShown("geofence", "type", true)
+            check("details shown again", cfg.deviceDetailsHidden === "" && cfg.geofenceDetailsHidden === "")
+            plugin.sendLayer("sectors", 2, "sector", "", 500, "#00838F", false, "sector")
+            waitFor("layer feature sent with a description", function() { var g = gf("S2"); return g && g.description === "S2" })
+        },
+        function() {
+            check("From layer: description from a field", gf("S2").description === "S2")
+            sleep(200)
+        },
+        function() {
             // ── custom past window: Van 3, two days ago ──
             var vs = new Date(vanStartIso)
             cfg.windowMinutes = -1
