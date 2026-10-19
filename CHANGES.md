@@ -4,7 +4,7 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
-# Unreleased — Geofences, and adding / deleting in Traccar
+# v0.7 (in development) — Geofences, and adding / deleting in Traccar
 
 ### Same send form and lists as the QGIS plugin
 - **The send form shows Traccar's fields.** Geofences: description, speed limit (km/h, saved in knots
@@ -25,7 +25,7 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 - Tests: 99 checks; the fake server also serves groups and calendars.
 
 Matches the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) (branch
-`send-point-geofences`): same geofence marker, same `qgis-…` identifiers, same colour attribute.
+`send-point-geofences`, v0.4.0): same geofence marker, same `qgis-…` identifiers, same colour attribute.
 
 - **Geofences on the map.** Traccar's geofences (areas, lines, circles) are drawn under the tracks,
   each in **its own colour** — Traccar's `color` attribute, else orange — with its name. They never go
