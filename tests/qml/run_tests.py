@@ -1,3 +1,6 @@
+# Copyright (C) 2026 TyHol
+# SPDX-License-Identifier: GPL-2.0-or-later
+
 """
 Runs main.qml outside QField: stand-in QField modules (stubs/), a test driver
 (Driver.qml) and a fake Traccar server. Any QML warning or JavaScript error is

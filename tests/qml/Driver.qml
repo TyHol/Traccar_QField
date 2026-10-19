@@ -1,3 +1,5 @@
+// Copyright (C) 2026 TyHol
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Test driver: plays QField (main window, map canvas, project, cloud connection,
 // point handler), loads ../../main.qml and runs it through every feature.
 // Run via run_tests.py, which also provides a fake Traccar server.
