@@ -38,6 +38,8 @@ from PySide6.QtCore import (QCoreApplication, QSettings, QUrl, QMetaObject, QTim
                             QtMsgType, qInstallMessageHandler)
 from PySide6.QtGui import QColor, QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
+from PySide6.QtCore import QObject, QPoint, Slot  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAIN = os.environ.get("TRACCAR_MAIN_QML") or os.path.abspath(os.path.join(HERE, "..", "..", "main.qml"))
@@ -205,6 +207,23 @@ ctx.setContextProperty("serverUrl", URL)
 ctx.setContextProperty("mainQmlUrl", QUrl.fromLocalFile(MAIN).toString())
 ctx.setContextProperty("vanStartIso", VAN_START.isoformat())
 ctx.setContextProperty("shotDir", os.environ.get("TRACCAR_SHOTS", ""))   # set to save phone-size screenshots
+
+
+class Finger(QObject):
+    """A real finger tap on the test window (a touch screen device), as on a phone."""
+    device = None
+
+    @Slot(int, int)
+    def tap(self, x, y):
+        win = engine.rootObjects()[0]
+        if Finger.device is None:
+            Finger.device = QTest.createTouchDevice()
+        QTest.touchEvent(win, Finger.device).press(0, QPoint(x, y)).commit()
+        QTest.touchEvent(win, Finger.device).release(0, QPoint(x, y)).commit()
+
+
+finger = Finger()
+ctx.setContextProperty("finger", finger)
 
 # Device colour as the QGIS plugin Traccar Live makes it (MD5 of the name → hue)
 ctx.setContextProperty("phoneAColor", QColor.fromHsv(

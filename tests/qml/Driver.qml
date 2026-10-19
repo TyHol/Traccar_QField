@@ -638,6 +638,35 @@ ApplicationWindow {
             waitFor("circle sent", function() { return gf("Base") !== undefined })
         },
         function() {
+            // ── on a phone: Add here at the crosshair; a finger tap without QField's point handler ──
+            plugin.startDraw("area")
+            plugin.addDrawPoint(plugin.mapCentreLonLat())
+            var c = plugin.drawPts[0]
+            check("Add corner: the map centre (crosshair)", c && Math.abs(c.lon + 6.335) < 1e-9
+                  && Math.abs(c.lat - 53.3675) < 1e-9, JSON.stringify(c))
+            plugin._drawTap(Qt.point(100, 100)); plugin._drawTap(Qt.point(101, 99))
+            check("one tap reported twice (QField and the plugin) adds one corner", plugin.drawPts.length === 2,
+                  plugin.drawPts.length)
+            sleep(500)                                      // the main window finishes closing
+        },
+        function() {
+            check("no dialog left over the map while adding", opened().length === 0)
+            L.saveHandler = pointHandler.handlers["traccarlive"]
+            delete pointHandler.handlers["traccarlive"]    // as QField 3.x: finger taps never reach plugins
+            var sp = canvas.mapToItem(root.contentItem, 200, 300)
+            finger.tap(Math.round(sp.x), Math.round(sp.y))
+            sleep(300)
+        },
+        function() {
+            pointHandler.handlers["traccarlive"] = L.saveHandler
+            var c = plugin.drawPts[2]
+            check("finger tap on the map adds a corner even when QField doesn't pass taps on",
+                  plugin.drawPts.length === 3 && c && Math.abs(c.lon - (200 / 20000 - 6.35)) < 1e-6
+                  && Math.abs(c.lat - (53.38 - 300 / 20000)) < 1e-6, JSON.stringify(plugin.drawPts))
+            plugin.cancelDraw()
+            sleep(100)
+        },
+        function() {
             check("circle geofence with the remembered radius", gf("Base").radius === cfg.circleRadius
                   && gf("Base").kind === "circle", gf("Base").radius)
             // ── send a point (device) ──

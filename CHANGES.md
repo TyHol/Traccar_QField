@@ -10,9 +10,15 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   narrow row drew their text past the window's edge. On a phone, *Clear* and *Add* are now icon buttons,
   leaving room for *Live*; the Show row wraps instead of squeezing if it ever must.
 - **⋮** (choose the details a list shows) is now an icon — some phone fonts have no "⋮" character.
+- **Adding by tapping the map works on phones.** Before QField 4.0 a finger tap on the map never reached
+  plugins (only mouse / stylus clicks did), so *Add → Point / Area / Line / Circle* ignored taps on a phone.
+  While adding, the plugin now catches map taps itself (one tap passed on by QField too counts once), and
+  shows a **crosshair** at the map centre with an **Add here** / **Add corner** button: move the map to put
+  the cross on the spot and tap it — works on every QField version.
 - New icons `icons/clear.svg`, `icons/more.svg` (Material Icons).
 - Tests: the main window (both tabs), the send forms, *From layer* and every Settings page are checked at
-  phone width (360) with phone-sized text — nothing may stick out or be squeezed. 109 checks.
+  phone width (360) with phone-sized text — nothing may stick out or be squeezed; a real finger
+  tap is tested without QField's tap forwarding. 113 checks.
 
 ---
 

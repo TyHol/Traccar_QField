@@ -671,6 +671,31 @@ Item {
             }
         }
 
+        // ── While adding: catch map taps here too. Before QField 4.0 a finger tap never
+        //    reached plugins (only mouse / stylus clicks did, from 3.6). A passive tap
+        //    handler doesn't stop the map panning or zooming; _drawTap() ignores the
+        //    second report of a tap QField also passed on.
+        TapHandler {
+            enabled: plugin.drawMode !== ""
+            onTapped: (eventPoint) => plugin._drawTap(eventPoint.position)
+        }
+
+        // ── Crosshair at the map centre while adding: pan the map, then "Add here" ──
+        Item {
+            visible: plugin.drawMode !== ""
+            x: parent.width / 2
+            y: parent.height / 2
+            Repeater {
+                model: [{ w: 30, h: 6 }, { w: 6, h: 30 }, { w: 26, h: 2 }, { w: 2, h: 26 }]
+                delegate: Rectangle {
+                    x: -modelData.w / 2; y: -modelData.h / 2
+                    width: modelData.w; height: modelData.h
+                    radius: 1
+                    color: index < 2 ? "white" : cfg.geofenceColor
+                }
+            }
+        }
+
         // ── Shape being drawn (Add area / line) ──────────────────────────
         Item {
             id: draft
@@ -1263,8 +1288,19 @@ Item {
         return { lon: ll.x, lat: ll.y }
     }
 
+    // A tap while adding (from QField's point handler and / or our own TapHandler):
+    // the same tap reported twice within 0.4 s and 20 px counts once.
+    property var lastDrawTap: ({ t: 0, x: -1e9, y: -1e9 })
     function _drawTap(point) {
+        var now = Date.now(), l = plugin.lastDrawTap
+        if (now - l.t < 400 && Math.abs(point.x - l.x) < 20 && Math.abs(point.y - l.y) < 20) return
+        plugin.lastDrawTap = { t: now, x: point.x, y: point.y }
         addDrawPoint(_screenToLonLat(point))
+    }
+
+    // Where the crosshair is: the centre of the map
+    function mapCentreLonLat() {
+        return _screenToLonLat(Qt.point(plugin.mapCanvas.width / 2, plugin.mapCanvas.height / 2))
     }
 
     function addDrawPoint(ll) {
@@ -1284,6 +1320,7 @@ Item {
     }
 
     function undoDraw() {
+        plugin.lastDrawTap = { t: 0, x: -1e9, y: -1e9 }          // a tap after Undo is always a new one
         plugin.drawPts = plugin.drawPts.slice(0, Math.max(0, plugin.drawPts.length - 1))
     }
 
@@ -2208,16 +2245,20 @@ Item {
                 font.bold: true
                 text: {
                     var n = plugin.drawPts.length
-                    if (plugin.drawMode === "point")  return "Tap the map where the point goes"
-                    if (plugin.drawMode === "circle") return "Tap the map at the centre of the circle"
+                    if (plugin.drawMode === "point")  return "Tap the map where the point goes — or move the map to put the cross on it and tap Add here"
+                    if (plugin.drawMode === "circle") return "Tap the centre of the circle — or move the map to put the cross on it and tap Add here"
                     var what = plugin.drawMode === "area" ? "area" : "line"
-                    return n === 0 ? "Tap the map at each corner of the " + what
-                                   : n + " corner" + (n === 1 ? "" : "s") + " — tap the next, then Done"
+                    return n === 0 ? "Tap each corner of the " + what + " — or put the cross on it and tap Add corner"
+                                   : n + " corner" + (n === 1 ? "" : "s") + " — tap the next (or Add corner), then Done"
                 }
             }
             Flow {
                 Layout.fillWidth: true
                 spacing: 4
+                Button {
+                    text: plugin.drawMode === "area" || plugin.drawMode === "line" ? "Add corner" : "Add here"
+                    onClicked: plugin.addDrawPoint(plugin.mapCentreLonLat())
+                }
                 Button {
                     text: "My location"
                     flat: true
