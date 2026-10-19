@@ -4,5 +4,5 @@ version=0.6
 qfieldMinimumVersion=3.3
 author=TyHol
 email=96470691+TyHol@users.noreply.github.com
-description=Display and save points and tracks from Traccar
-homepage=https://www.traccar.org/traccar-api/
+description=Display and save points and tracks from Traccar (unofficial, not affiliated with Traccar)
+homepage=https://github.com/TyHol/Traccar_QField
