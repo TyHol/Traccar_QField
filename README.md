@@ -5,6 +5,8 @@ A [QField](https://qfield.org) plugin that shows your [Traccar](https://www.trac
 - **One time window for everything** — *Last 15 minutes … Last 3 months*, custom dates, or the start/end of a feature such as an incident. The tracks on the map are the fixes inside the window, and the Save buttons save exactly that.
 - **Live map overlay** — markers, name labels, GPS-accuracy circles and tracks, refreshed every few seconds. Nothing is written to your project until you tap Save.
 - **Two layers, saved on demand** — positions and tracks, into any point / line layers you choose.
+- **Geofences** — Traccar's areas, lines and circles on the map in their own colours; show / hide, recolour or delete them.
+- **Add to Traccar from the field** — tap the map to send a point (device), an area, a line or a circle, or send a layer's features.
 - **QFieldCloud-safe** — saves wait while a cloud sync is running, then go ahead.
 - **Local time everywhere** on screen, including summer time; stored in UTC.
 
@@ -54,6 +56,8 @@ Each device in the list shows how many fixes it has in the window and their time
 - **Refresh** — load the window once. **Clear** — stop Live and remove everything from the map.
 - **Show** — switch Markers, Labels, Tracks and Accuracy circles on or off.
 - **Devices** — each row shows the latest position (lat/long, degrees + minutes, Irish Grid, UK Grid or the project CRS — Settings (cog) → Advanced); the copy button copies it to the clipboard and the target button centres the map on that device. Untick a device to hide it from the map and leave it out of the Save buttons (remembered); the tick by *Devices* shows or hides them all. Each device has its own colour (the same as in the QGIS plugin); markers and tracks turn grey when the last fix is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
+- **Geofences** — Traccar's geofences, each in its own colour (never grey). Untick one to hide it (remembered); tap its colour to change it (saved in Traccar); the target centres the map on it; the bin deletes it from Traccar after asking. *Geofences* under Show switches them all off.
+- **Add** — *Point*: tap the map (or *My location*) and give a name; a new name adds a device in Traccar, an existing device's name moves it there. *Area* / *Line*: tap each corner, then *Done*. *Circle*: tap the centre, choose a radius. *From layer…*: send a layer's features (all or one), named from a field. Geofences get the colour you pick; one sent before with the same name is replaced. Points added this way have a bin in the device list.
 - **Save positions** / **Save tracks** — the line underneath shows where they go; tap it to change.
 
 ### Saving
@@ -96,7 +100,7 @@ Settings are a list of short pages; changes apply immediately.
 
 | Page | Contains |
 |---|---|
-| **Connection** | Server URL, email / username, password, *Test connection* |
+| **Connection** | Server URL, email / username, password, *Test connection*, *Send points to* (Traccar's OsmAnd address; blank = port 5055 on the server) |
 | **Layers** | Positions layer, device-name field, latest / every fix · Tracks layer, device-name field, add / keep most recent |
 | **Tag** | On/off, tag text, field, use the feature's display value |
 | **Advanced** | Map button, location format (lat/long, degrees + minutes, Irish Grid, UK Grid, project CRS), refresh interval, grey-marker limit, the layer and fields used by *From feature* |
@@ -111,6 +115,8 @@ The password is stored in QField's settings on the device, like other plugin set
 | *No fixes in this window* | The device list shows each device's fixes and span — pick a longer window or check the device's clock. |
 | *… layer did not accept …* | The layer must be editable and of the right type (points for positions, lines for tracks). |
 | Nothing saved during a sync | Expected — it saves when QFieldCloud finishes. |
+| *Send point: no response* | Traccar's OsmAnd port (5055) must be reachable from the phone; set *Send points to* if it differs. |
+| *Couldn't add … to Traccar* / *HTTP 403* | Your Traccar account isn't allowed to add devices or geofences — ask the server's admin. |
 
 ## Development
 - Everything is in [`main.qml`](main.qml); [`metadata.txt`](metadata.txt) holds the version.

@@ -4,6 +4,36 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# Unreleased — Geofences, and adding / deleting in Traccar
+
+Matches the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) (branch
+`send-point-geofences`): same geofence marker, same `qgis-…` identifiers, same colour attribute.
+
+- **Geofences on the map.** Traccar's geofences (areas, lines, circles) are drawn under the tracks,
+  each in **its own colour** — Traccar's `color` attribute, else orange — with its name. They never go
+  grey: a geofence isn't a fix that gets old. *Geofences* under Show switches them all on / off
+  (`showGeofences`). Loaded with every Refresh / Live load.
+- **Geofence list** under the devices: tick to show / hide each one (remembered, `hiddenGeofences`),
+  tap the colour to pick another (saved in Traccar), the target to centre the map on it, the bin to
+  **delete it from Traccar** after a confirmation — one made in Traccar gets an extra warning.
+- **Add → Point**: tap the map (or *My location*), give a name. A new name adds a device with a
+  `qgis-<name>-<time>` identifier and sends the position through Traccar's OsmAnd port; an existing
+  device's name (or identifier) moves that device. **Settings → Connection → Send points to**
+  overrides the OsmAnd address (default `http://<server host>:5055/`, `sendUrl`).
+- **Delete a point** — a bin on device rows added this way (identifier `qgis-…`) only.
+- **Add → Area / Line**: tap each corner (*Undo*, *My location*), *Done*, name, colour → a geofence.
+  **Add → Circle**: tap the centre, name, radius (250 / 500 / 1000 m or any).
+- **Add → From layer**: a layer's features — all or one — become geofences named from a field (or a
+  typed name, numbered). Any CRS, Z / M and multipart; polygon holes are dropped; points become
+  circles of a chosen radius, or points (devices). Shapes over Traccar's 4096-character limit are
+  thinned until they fit.
+- Sending a geofence with the same name as one sent from QGIS or QField before **replaces** it.
+- New icon `icons/delete.svg`.
+- Tests: 90 checks (was 54). The fake server now serves geofences, adding / deleting devices and the
+  OsmAnd port.
+
+---
+
 # v0.6 — Show / hide devices, colours, grid references
 
 Ported from the QGIS plugin [Traccar_QGIS](https://github.com/TyHol/Traccar_QGIS) v0.3.0, kept simple.

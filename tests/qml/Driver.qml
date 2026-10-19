@@ -31,6 +31,7 @@ ApplicationWindow {
             signal rotationChanged()
             signal outputSizeChanged()
             function coordinateToScreen(pt) { return Qt.point((pt.x + 6.35) * 20000, (53.38 - pt.y) * 20000) }
+            function screenToCoordinate(p) { return { x: p.x / 20000 - 6.35, y: 53.38 - p.y / 20000 } }
             function setCenter(pt, handleMargins) { lastCenter = pt }
         }
     }
@@ -44,6 +45,12 @@ ApplicationWindow {
 
     QtObject { id: cloud; property int state: 0 }       // QfCloudConnection: 0 Idle, 1 Busy
 
+    QtObject {                                          // QField's GPS
+        id: positionSource
+        property var positionInformation: ({ latitude: 53.361, longitude: -6.333,
+                                             latitudeValid: true, longitudeValid: true })
+    }
+
     QtObject {
         id: ifaceStub
         function mainWindow() { return root }
@@ -51,6 +58,7 @@ ApplicationWindow {
         function findItemByObjectName(n) {
             if (n === "pointHandler") return pointHandler
             if (n === "cloudConnection") return cloud
+            if (n === "positionSource") return positionSource
             return null
         }
         function addItemToPluginsToolbar(item) { item.parent = toolbarRow }
@@ -160,6 +168,23 @@ ApplicationWindow {
         x.open("GET", serverUrl + path)
         x.send()
     }
+    // What the fake server holds now → serverState (async; wait for it)
+    property var serverState: null
+    function fetchState() {
+        serverState = null
+        var x = new XMLHttpRequest()
+        x.open("GET", serverUrl + "/test/state")
+        x.onreadystatechange = function() { if (x.readyState === XMLHttpRequest.DONE) serverState = JSON.parse(x.responseText) }
+        x.send()
+        waitFor("server state", function() { return serverState !== null })
+    }
+    function tap(lon, lat) {
+        var sp = canvas.mapSettings.coordinateToScreen({ x: lon, y: lat })
+        return pointHandler.handlers["traccarlive"](Qt.point(sp.x, sp.y), null, "clicked")
+    }
+    function sendDlg() { return opened().filter(function(o) { return o.nameText !== undefined })[0] }
+    function gf(name) { return plugin.geofences.filter(function(g) { return g.name === name })[0] }
+    function wktGeom(wkt) { return { wkt: wkt, asWkt: function(p) { return wkt } } }
     function opened() {
         var out = []
         var res = plugin.resources
@@ -399,6 +424,202 @@ ApplicationWindow {
         function() {
             opened()[0].close()
             plugin.setAllShown(true)
+            // ── geofences from Traccar ──
+            plugin.loadGeofences()
+            waitFor("geofences load", function() { return plugin.geofences.length === 2 })
+        },
+        function() {
+            var lake = gf("Lake sector"), trail = gf("Trail")
+            check("geofences listed by name, with type and origin",
+                  plugin.geofences[0] === lake && lake.kind === "polygon" && !lake.mine
+                  && trail.kind === "line" && trail.mine && plugin.geofenceType(trail) === "Line")
+            check("each in its own colour: Traccar's 'color', else orange",
+                  lake.color === "#1565C0" && trail.color === "#E65100", lake.color + " / " + trail.color)
+            check("Traccar's latitude-first text read as lon / lat",
+                  lake.coords[0].lon === -6.34 && lake.coords[0].lat === 53.36 && lake.coords.length === 5)
+            check("name placed in the middle of the area", Math.abs(lake.labelLon + 6.33) < 1e-9
+                  && Math.abs(lake.labelLat - 53.365) < 1e-9, lake.labelLon + ", " + lake.labelLat)
+            check("both drawn on the map", plugin.geofenceModel.length === 2)
+            var c = plugin.parseArea("CIRCLE (53.36 -6.33, 250)")
+            check("circle → 73-point ring, radius kept", c.kind === "circle" && c.coords.length === 73
+                  && c.radius === 250 && plugin.geofenceType(c) === "Circle 250 m")
+            plugin.setGeofenceShown(7, false)
+            check("untick one: hidden from the map, remembered",
+                  plugin.geofenceModel.length === 1 && plugin.geofenceModel[0].name === "Trail" && cfg.hiddenGeofences === "7")
+            cfg.showGeofences = false
+            check("Geofences off under Show: none drawn", plugin.geofenceModel.length === 0)
+            cfg.showGeofences = true
+            plugin.setAllGeofencesShown(true)
+            check("show all again", plugin.geofenceModel.length === 2 && cfg.hiddenGeofences === "")
+            // ── shapes → Traccar text ──
+            var a = plugin.areaText("polygon", [{ lon: -6.3, lat: 53.3 }, { lon: -6.2, lat: 53.3 }, { lon: -6.2, lat: 53.4 }], 0)
+            check("area: latitude first, ring closed",
+                  a.area === "POLYGON ((53.300000 -6.300000, 53.300000 -6.200000, 53.400000 -6.200000, 53.300000 -6.300000))",
+                  a.area)
+            check("too few corners → nothing", plugin.areaText("polygon", [{ lon: 1, lat: 1 }, { lon: 2, lat: 2 }], 0) === null)
+            var big = []
+            for (var i = 0; i < 400; i++) big.push({ lon: -6.3 + i * 0.0001, lat: 53.3 + (i % 2) * 0.001 })
+            var bl = plugin.areaText("line", big, 0)
+            check("long shape thinned to fit Traccar's 4096 characters", bl && bl.simplified && bl.area.length <= 4000,
+                  bl ? bl.area.length : "null")
+            var parts = plugin.wktParts("MultiPolygonZ (((1 2 9, 3 2 9, 3 4 9, 1 2 9), (1.5 2.5 0, 2 2.5 0, 2 3 0, 1.5 2.5 0)),"
+                                        + " ((10 20 0, 11 20 0, 11 21 0, 10 20 0)))", { authid: "EPSG:4326" })
+            check("multipolygon with a hole and Z: two parts, outer rings only",
+                  parts.length === 2 && parts[0].coords.length === 4 && parts[1].coords[0].lon === 10, JSON.stringify(parts))
+            var itm = plugin.wktParts("LineString (-630000 5335000, -629000 5336000)", { authid: "EPSG:2157" })
+            check("other CRS reprojected to lon / lat", itm.length === 1 && itm[0].kind === "line"
+                  && Math.abs(itm[0].coords[0].lon + 6.3) < 1e-9 && Math.abs(itm[0].coords[1].lat - 53.36) < 1e-9,
+                  JSON.stringify(itm))
+            var mp = plugin.wktParts("MultiPoint ((1 2), (3 4))", { authid: "EPSG:4326" })
+            check("multipoint → one point each", mp.length === 2 && mp[1].kind === "point" && mp[1].coords[0].lat === 4)
+            // ── change a colour (saved in Traccar) ──
+            plugin.setGeofenceColor(7, "#2E7D32")
+            waitFor("colour saved", function() { var g = gf("Lake sector"); return g && g.color === "#2E7D32" })
+        },
+        function() {
+            fetchState()
+        },
+        function() {
+            var lake = serverState.geofences.filter(function(g) { return g.id === 7 })[0]
+            check("colour change keeps the rest of the geofence", lake.attributes.color === "#2E7D32"
+                  && lake.area.indexOf("POLYGON") === 0 && lake.name === "Lake sector", JSON.stringify(lake))
+            // ── draw an area on the map ──
+            cfg.geofenceColor = "#6A1B9A"
+            plugin.startDraw("area")
+            check("Add → Area: drawing, map taps taken", plugin.drawMode === "area" && tap(-6.30, 53.37) === true)
+            tap(-6.29, 53.37); tap(-6.29, 53.36)
+            check("three corners, Done allowed", plugin.drawPts.length === 3 && plugin.canFinishDraw()
+                  && Math.abs(plugin.drawPts[1].lon + 6.29) < 1e-9 && Math.abs(plugin.drawPts[1].lat - 53.37) < 1e-9,
+                  JSON.stringify(plugin.drawPts))
+            plugin.undoDraw()
+            check("Undo removes the last corner", plugin.drawPts.length === 2 && !plugin.canFinishDraw())
+            tap(-6.29, 53.36)
+            plugin.finishDraw()
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("Done opens the name dialog for the area", d && d.mode === "area" && d.coords.length === 3)
+            d.nameText = "Sector A"
+            d.send()
+            waitFor("area sent", function() { return gf("Sector A") !== undefined })
+        },
+        function() {
+            var s = gf("Sector A")
+            check("area sent as a geofence in the chosen colour, marked as from QGIS / QField",
+                  s.kind === "polygon" && s.coords.length === 4 && s.color === "#6A1B9A" && s.mine)
+            check("drawing ends after sending", plugin.drawMode === "" && plugin.drawPts.length === 0)
+            plugin.upsertGeofences([{ name: "sector a", area: "CIRCLE (53.36 -6.30, 300)" }], "#C62828")
+            waitFor("re-sent", function() { var g = gf("sector a"); return g && g.kind === "circle" })
+        },
+        function() {
+            check("same name again replaces it (no duplicate)", plugin.geofences.length === 3
+                  && gf("sector a").color === "#C62828" && gf("Sector A") === undefined, plugin.geofences.length)
+            // ── circle at my location ──
+            plugin.startDraw("circle")
+            plugin.addDrawPoint(plugin.gpsLonLat())
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("circle at 'My location' (GPS)", d && d.mode === "circle" && d.coords[0].lat === 53.361)
+            d.nameText = "Base"
+            d.send()
+            waitFor("circle sent", function() { return gf("Base") !== undefined })
+        },
+        function() {
+            check("circle geofence with the remembered radius", gf("Base").radius === cfg.circleRadius
+                  && gf("Base").kind === "circle", gf("Base").radius)
+            // ── send a point (device) ──
+            cfg.sendUrl = serverUrl + "/osmand/"
+            plugin.startDraw("point")
+            tap(-6.31, 53.362)
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("Add → Point: one tap opens the name dialog", d && d.mode === "point")
+            d.nameText = "Clue 4"
+            d.send()
+            waitFor("fix on the OsmAnd port", function() { return toasts[toasts.length - 1].indexOf("Clue 4") >= 0 })
+        },
+        function() { fetchState() },
+        function() {
+            var dev = serverState.devices.filter(function(x) { return x.name === "Clue 4" })[0]
+            check("new name → new device with a qgis-… identifier, fix sent",
+                  dev && /^qgis-clue-4-\d+$/.test(dev.uniqueId) && serverState.osmand === 1, JSON.stringify(dev))
+            check("name remembered for next time", cfg.lastSendName === "Clue 4")
+            L.clueId = dev ? String(dev.id) : ""
+            plugin.sendPoint("Phone A", -6.32, 53.36)
+            sleep(400)
+        },
+        function() { fetchState() },
+        function() {
+            check("existing device's name → that device moves (no new device)",
+                  serverState.devices.length === 4 && serverState.osmand === 2, serverState.devices.length)
+            plugin.reloadWindow()
+            waitFor("reload with the new point", function() { return !plugin.loading })
+        },
+        function() {
+            var row = plugin.deviceRows.filter(function(r) { return r.name === "Clue 4" })[0]
+            var ph  = plugin.deviceRows.filter(function(r) { return r.name === "Phone A" })[0]
+            check("sent point listed and deletable; other devices not", row && row.sent && row.pos !== null && !ph.sent)
+            toolbarRow.children[0].clicked()        // draw the lists with geofences and a sent point
+            sleep(200)
+        },
+        function() {
+            opened()[0].close()
+            plugin.deleteSentPoint(L.clueId)
+            plugin.deleteSentPoint("1")             // not a sent point: refused
+            waitFor("point deleted", function() {
+                return !plugin.deviceRows.some(function(r) { return r.name === "Clue 4" }) })
+        },
+        function() { sleep(300) },
+        function() { fetchState() },
+        function() {
+            check("sent point deleted from Traccar; other devices never",
+                  serverState.devices.length === 3 && serverState.devices.some(function(x) { return x.id === 1 }))
+            plugin.deleteGeofence(7)
+            waitFor("geofence deleted", function() { return gf("Lake sector") === undefined })
+        },
+        function() { fetchState() },
+        function() {
+            check("geofence made in Traccar deleted",
+                  !serverState.geofences.some(function(g) { return g.id === 7 }))
+            // ── from a layer: polygons in another CRS, points as circles / as points ──
+            L.sec = makeLayer("sectors", 2, 6, [["sector", "QString"]], "EPSG:2157")
+            var addF = function(lyr, id, attrs, wkt) {
+                lyr._committed.push({ id: id, geometry: wktGeom(wkt),
+                                      attribute: function(n) { return attrs[n] === undefined ? null : attrs[n] } })
+            }
+            addF(L.sec, 1, { sector: "S1" }, "MultiPolygon (((-630000 5336000, -629000 5336000, -629000 5337000, -630000 5336000)))")
+            addF(L.sec, 2, { sector: "S2" }, "Polygon ((-628000 5336000, -627000 5336000, -627000 5337000, -628000 5336000))")
+            addF(L.sec, 3, { sector: null }, "Polygon EMPTY")
+            plugin.sendLayer("sectors", -1, "sector", "", 500, "#00838F", false)
+            waitFor("layer sent", function() { return gf("S1") !== undefined && gf("S2") !== undefined })
+        },
+        function() {
+            var s1 = gf("S1")
+            check("layer's polygons → geofences named from a field, reprojected, in the colour",
+                  s1.kind === "polygon" && Math.abs(s1.coords[0].lon + 6.3) < 1e-9 && s1.color === "#00838F")
+            check("feature with no shape skipped and reported",
+                  toasts.some(function(t) { return t.indexOf("1 feature(s) skipped") === 0 }))
+            L.pois = makeLayer("pois", 0, 1, [["name", "QString"]])
+            L.pois._committed.push({ id: 1, geometry: wktGeom("Point (-6.31 53.36)"),
+                                     attribute: function(n) { return n === "name" ? "Hut" : null } })
+            L.pois._committed.push({ id: 2, geometry: wktGeom("Point (-6.30 53.35)"),
+                                     attribute: function(n) { return n === "name" ? "Car park" : null } })
+            plugin.sendLayer("pois", 2, "name", "", 150, "#00838F", false)
+            waitFor("one point as a circle", function() { return gf("Car park") !== undefined })
+        },
+        function() {
+            check("one chosen point → circle of the chosen radius", gf("Car park").radius === 150 && gf("Hut") === undefined)
+            plugin.sendLayer("pois", 1, "name", "", 150, "#00838F", true)
+            sleep(500)
+        },
+        function() { fetchState() },
+        function() {
+            check("point feature sent as a point (device)", serverState.devices.some(function(x) { return x.name === "Hut" }))
             sleep(200)
         },
         function() {

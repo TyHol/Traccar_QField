@@ -67,6 +67,14 @@ Item {
         property string hiddenDevices:   ""     // comma-separated Traccar ids unticked in the device list
         property int    locationFormat:  0      // 0 = lat / long, 1 = Irish Grid, 2 = UK Grid, 3 = deg + min, 4 = project CRS
 
+        // Geofences and points sent to Traccar
+        property bool   showGeofences:   true
+        property string hiddenGeofences: ""     // comma-separated Traccar geofence ids unticked in the list
+        property string geofenceColor:   "#E65100"
+        property int    circleRadius:    500    // metres, for circles and points sent as geofences
+        property string sendUrl:         ""     // OsmAnd endpoint for points; blank = http://<server host>:5055
+        property string lastSendName:    ""     // name offered first when sending a point
+
         // Layers (written only on Save)
         property string pointsLayerName: ""
         property string pointsNameField: ""     // extra text field to receive the device name
@@ -136,6 +144,9 @@ Item {
     property string connState:    ""      // "" unknown, "ok", or an error message
     property int    mapTick:      0       // bumped on pan / zoom / rotate → re-place overlay items
     property int    crsTick:      0       // bumped when the map CRS changes → re-project
+    property var    geofences:    []      // Traccar geofences: {id, name, area, mine, raw, color, kind, coords, radius}
+    property string drawMode:     ""      // "" or what a map tap adds: "point", "circle", "area", "line"
+    property var    drawPts:      []      // corners tapped so far, {lon, lat}
 
     // Pending layer writes (held back while QFieldCloud is busy)
     property var    writeQueue:     []
@@ -614,6 +625,79 @@ Item {
         parent:  plugin.mapCanvas
         anchors.fill: parent
 
+        // ── Geofences: areas, lines, circles in their own colour ─────────
+        //    (never grey — a geofence isn't a fix that gets old)
+        Repeater {
+            model: plugin.geofenceModel
+            delegate: Item {
+                id: gfItem
+                anchors.fill: parent
+                property var g:    modelData
+                property var proj: { plugin.crsTick; return plugin._projectCoords(g.coords) }
+                property var pts:  { plugin.mapTick; return plugin._toScreen(proj) }
+                property point lp: {
+                    plugin.mapTick; plugin.crsTick
+                    var s = plugin.mapCanvas.mapSettings.coordinateToScreen(plugin._toMapPoint(g.labelLon, g.labelLat))
+                    return Qt.point(s.x, s.y)
+                }
+                Shape {
+                    anchors.fill: parent
+                    visible: gfItem.pts.length > 1
+                    ShapePath {
+                        strokeColor: gfItem.g.color
+                        strokeWidth: 2
+                        fillColor:   gfItem.g.kind === "line" ? "transparent" : "#40" + gfItem.g.color.substr(1)
+                        joinStyle:   ShapePath.RoundJoin
+                        PathPolyline { path: gfItem.pts }
+                    }
+                }
+                Label {
+                    visible: cfg.showLabels && gfItem.g.name !== ""
+                    x: gfItem.lp.x - width / 2
+                    y: gfItem.lp.y - height / 2
+                    text: gfItem.g.name
+                    font.pixelSize: 12
+                    font.italic: true
+                    color: Qt.darker(gfItem.g.color, 1.4)
+                    style: Text.Outline
+                    styleColor: "white"
+                }
+            }
+        }
+
+        // ── Shape being drawn (Add area / line) ──────────────────────────
+        Item {
+            id: draft
+            anchors.fill: parent
+            visible: plugin.drawMode !== "" && plugin.drawPts.length > 0
+            property var pts: {
+                plugin.mapTick; plugin.crsTick
+                var p = plugin._toScreen(plugin._projectCoords(plugin.drawPts))
+                if (plugin.drawMode === "area" && p.length > 2) p = p.concat([p[0]])
+                return p
+            }
+            Shape {
+                anchors.fill: parent
+                ShapePath {
+                    strokeColor: cfg.geofenceColor
+                    strokeWidth: 3
+                    strokeStyle: ShapePath.DashLine
+                    fillColor:   plugin.drawMode === "area" ? "#30" + cfg.geofenceColor.substr(1) : "transparent"
+                    PathPolyline { path: draft.pts }
+                }
+            }
+            Repeater {
+                model: draft.pts
+                delegate: Rectangle {
+                    x: modelData.x - 6; y: modelData.y - 6
+                    width: 12; height: 12; radius: 6
+                    color: "white"
+                    border.color: cfg.geofenceColor
+                    border.width: 3
+                }
+            }
+        }
+
         // ── Tracks: the fixes inside the time window ──────────────────────
         Repeater {
             model: cfg.showTrails ? plugin.trackModel : []
@@ -790,6 +874,7 @@ Item {
     }
 
     function _onMapTap(point) {
+        if (plugin.drawMode !== "") { _drawTap(point); return true }
         if (!cfg.showMarkers) return false
         var ms = plugin.mapCanvas.mapSettings
         for (var i = 0; i < plugin.overlayModel.length; i++) {
@@ -804,6 +889,435 @@ Item {
             }
         }
         return false
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  GEOFENCES AND POINTS IN TRACCAR
+    //  Traccar keeps a geofence's shape as text with LATITUDE FIRST:
+    //  "POLYGON ((52.1 -9.5, …))", "LINESTRING (…)", "CIRCLE (52.1 -9.5, 500)".
+    //  Same rules as the QGIS plugin Traccar Live: geofences sent from either
+    //  plugin carry the createdByTraccarLiveQgis attribute (sending the same name
+    //  again replaces them), and points sent as devices get a "qgis-…" identifier.
+    // ════════════════════════════════════════════════════════════════════════
+    readonly property string geofenceMark:    "createdByTraccarLiveQgis"
+    readonly property string defaultGfColor:  "#E65100"
+    readonly property string sentPointPrefix: "qgis-"
+    readonly property int    maxAreaChars:    4000      // Traccar keeps the area in a 4096-character column
+    readonly property var    swatches: ["#E65100", "#C62828", "#AD1457", "#6A1B9A", "#1565C0",
+                                        "#00838F", "#2E7D32", "#F9A825", "#4E342E", "#424242"]
+
+    // Geofences drawn on the map: ticked ones, while Geofences is on under Show
+    readonly property var geofenceModel: {
+        if (!cfg.showGeofences) return []
+        var hidden = _gfHiddenIds()
+        return plugin.geofences.filter(function(g) { return !hidden[String(g.id)] && g.coords.length > 1 })
+    }
+
+    function _normColor(c) {
+        var s = String(c || "").trim()
+        if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toUpperCase()
+        if (/^#[0-9a-fA-F]{3}$/.test(s)) return ("#" + s[1] + s[1] + s[2] + s[2] + s[3] + s[3]).toUpperCase()
+        return ""
+    }
+
+    // Traccar area text → {kind: "polygon" | "line" | "circle", coords: [{lon, lat}], radius}, or null.
+    // Circles come back as a 72-sided ring for drawing.
+    function parseArea(area) {
+        var s = String(area || "").trim()
+        var num = "(-?\\d+(?:\\.\\d+)?)"
+        var m = new RegExp("^CIRCLE\\s*\\(\\s*" + num + "\\s+" + num + "\\s*,\\s*" + num + "\\s*\\)", "i").exec(s)
+        if (m) {
+            var lat = parseFloat(m[1]), lon = parseFloat(m[2]), r = parseFloat(m[3])
+            var k = 111320, kx = k * Math.max(Math.cos(lat * Math.PI / 180), 0.01)
+            var ring = []
+            for (var i = 0; i <= 72; i++) {
+                var a = 2 * Math.PI * i / 72
+                ring.push({ lon: lon + r * Math.sin(a) / kx, lat: lat + r * Math.cos(a) / k })
+            }
+            return { kind: "circle", coords: ring, radius: r, centre: { lon: lon, lat: lat } }
+        }
+        m = /^(POLYGON|LINESTRING)\s*\(+([\s\S]*?)\)+\s*$/i.exec(s)
+        if (!m) return null
+        var coords = []
+        var pairs = m[2].split(",")
+        for (var j = 0; j < pairs.length; j++) {
+            var xy = pairs[j].trim().split(/\s+/)
+            var la = parseFloat(xy[0]), lo = parseFloat(xy[1])
+            if (!isFinite(la) || !isFinite(lo)) return null
+            coords.push({ lon: lo, lat: la })
+        }
+        return { kind: m[1].toUpperCase() === "LINESTRING" ? "line" : "polygon", coords: coords, radius: 0 }
+    }
+
+    function _ll(lon, lat) { return lat.toFixed(6) + " " + lon.toFixed(6) }
+
+    // Corners ({lon, lat}) → Traccar area text; very detailed shapes are thinned until they fit.
+    // Returns {area, simplified}, or null when there is nothing Traccar can take.
+    function areaText(kind, coords, radius) {
+        if (kind === "circle")
+            return coords.length > 0 ? { area: "CIRCLE (" + _ll(coords[0].lon, coords[0].lat) + ", "
+                                                 + Number(radius).toFixed(1) + ")", simplified: false } : null
+        var pts = coords.slice()
+        if (kind === "polygon") {
+            var f = pts[0], l = pts[pts.length - 1]
+            if (pts.length > 0 && (f.lon !== l.lon || f.lat !== l.lat)) pts.push(f)
+            if (pts.length < 4) return null
+        } else if (pts.length < 2) return null
+        var make = function(p) {
+            var t = p.map(function(c) { return _ll(c.lon, c.lat) }).join(", ")
+            return kind === "polygon" ? "POLYGON ((" + t + "))" : "LINESTRING (" + t + ")"
+        }
+        var text = make(pts), step = 1
+        while (text.length > maxAreaChars && pts.length > 8) {
+            step++
+            var thin = []
+            for (var i = 0; i < pts.length - 1; i += step) thin.push(pts[i])
+            thin.push(pts[pts.length - 1])
+            if (thin.length < (kind === "polygon" ? 4 : 2)) break
+            text = make(thin)
+        }
+        return text.length <= maxAreaChars ? { area: text, simplified: step > 1 } : null
+    }
+
+    function geofenceType(g) {
+        if (g.kind === "circle") return "Circle " + Math.round(g.radius) + " m"
+        return g.kind === "line" ? "Line" : g.kind === "polygon" ? "Area" : "?"
+    }
+
+    function loadGeofences() {
+        if (cfg.username === "") return
+        _get("/api/geofences", function(data) {
+            var out = []
+            data.forEach(function(g) {
+                var attrs  = g.attributes || {}
+                var parsed = parseArea(g.area) || { kind: "", coords: [], radius: 0 }
+                var c = parsed.coords
+                var lp = parsed.kind === "circle" ? parsed.centre
+                       : parsed.kind === "line"   ? c[Math.floor(c.length / 2)]
+                       : _ringMiddle(c)
+                out.push({ id: g.id, name: g.name || "", area: g.area || "", mine: attrs[geofenceMark] === true,
+                           raw: g, color: _normColor(attrs.color) || defaultGfColor,
+                           kind: parsed.kind, coords: c, radius: parsed.radius,
+                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0 })
+            })
+            out.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) })
+            plugin.geofences = out
+        }, function(msg) { console.log("Traccar Live: geofences: " + msg) })
+    }
+
+    // Where a polygon's name goes: its centroid (area-weighted), else the middle of its corners
+    function _ringMiddle(c) {
+        if (!c || c.length === 0) return null
+        var a = 0, x = 0, y = 0
+        for (var i = 0; i < c.length - 1; i++) {
+            var cr = c[i].lon * c[i + 1].lat - c[i + 1].lon * c[i].lat
+            a += cr; x += (c[i].lon + c[i + 1].lon) * cr; y += (c[i].lat + c[i + 1].lat) * cr
+        }
+        if (Math.abs(a) > 1e-14) return { lon: x / (3 * a), lat: y / (3 * a) }
+        var sx = 0, sy = 0
+        c.forEach(function(p) { sx += p.lon; sy += p.lat })
+        return { lon: sx / c.length, lat: sy / c.length }
+    }
+
+    // ── Geofences unticked in the list: not drawn (remembered) ────────────
+    function _gfHiddenIds() {
+        var out = {}
+        cfg.hiddenGeofences.split(",").forEach(function(s) { if (s !== "") out[s] = true })
+        return out
+    }
+
+    function setGeofenceShown(id, on) {
+        var ids = _gfHiddenIds()
+        if (on) delete ids[String(id)]
+        else    ids[String(id)] = true
+        cfg.hiddenGeofences = Object.keys(ids).sort(function(a, b) { return a - b }).join(",")
+    }
+
+    function setAllGeofencesShown(on) {
+        cfg.hiddenGeofences = on ? "" : plugin.geofences.map(function(g) { return g.id }).join(",")
+    }
+
+    function _geofence(id) {
+        for (var i = 0; i < plugin.geofences.length; i++) if (String(plugin.geofences[i].id) === String(id)) return plugin.geofences[i]
+        return null
+    }
+
+    function zoomToGeofence(id) {
+        var g = _geofence(id)
+        if (!g) return
+        setGeofenceShown(id, true)
+        if (!cfg.showGeofences) cfg.showGeofences = true
+        zoomToDevice({ longitude: g.labelLon, latitude: g.labelLat })
+    }
+
+    // ── Changes in Traccar ────────────────────────────────────────────────
+    function setGeofenceColor(id, color) {
+        var g = _geofence(id)
+        if (!g) return
+        var body  = JSON.parse(JSON.stringify(g.raw))
+        body.attributes = body.attributes || {}
+        body.attributes.color = color
+        _send("PUT", "/api/geofences/" + g.id, body, function() {
+            mainWindow.displayToast("Colour of '" + g.name + "' saved in Traccar")
+            loadGeofences()
+        }, function(msg) { mainWindow.displayToast("Couldn't change '" + g.name + "': " + msg) })
+    }
+
+    function deleteGeofence(id) {
+        var g = _geofence(id)
+        if (!g) return
+        _send("DELETE", "/api/geofences/" + g.id, null, function() {
+            plugin.geofences = plugin.geofences.filter(function(x) { return x.id !== g.id })
+            mainWindow.displayToast("Deleted '" + g.name + "' from Traccar")
+        }, function(msg) { mainWindow.displayToast("Couldn't delete '" + g.name + "': " + msg) })
+    }
+
+    function deleteSentPoint(devId) {
+        var info = plugin.deviceInfo[devId] || {}
+        if (String(info.uniqueId || "").indexOf(sentPointPrefix) !== 0) return
+        _send("DELETE", "/api/devices/" + devId, null, function() {
+            var d = {}, t = {}, l = {}
+            for (var k in plugin.deviceInfo) if (String(k) !== String(devId)) d[k] = plugin.deviceInfo[k]
+            for (var k2 in plugin.tracks)    if (k2 !== String(devId)) t[k2] = plugin.tracks[k2]
+            for (var k3 in plugin.latest)    if (k3 !== String(devId)) l[k3] = plugin.latest[k3]
+            plugin.deviceInfo = d; plugin.tracks = t; plugin.latest = l
+            _rebuildAll()
+            mainWindow.displayToast("Deleted '" + info.name + "' from Traccar")
+        }, function(msg) { mainWindow.displayToast("Couldn't delete '" + info.name + "': " + msg) })
+    }
+
+    // items: [{name, area}], all in one colour. A geofence sent from QGIS / QField before under
+    // the same name is replaced; anything else is added. done(added, replaced, errors) is optional.
+    function upsertGeofences(items, color, done) {
+        if (items.length === 0) return
+        _get("/api/geofences", function(existing) {
+            var mine = {}
+            existing.forEach(function(g) {
+                if ((g.attributes || {})[geofenceMark] === true) mine[String(g.name || "").trim().toLowerCase()] = g
+            })
+            var st = { left: items.length, added: 0, replaced: 0, errors: [] }
+            var finish = function() {
+                if (--st.left > 0) return
+                var msg = "Sent " + (st.added + st.replaced) + " geofence(s) to Traccar"
+                if (st.replaced > 0) msg += " (" + st.replaced + " replaced)"
+                if (st.errors.length > 0) msg += "; " + st.errors.length + " failed: " + st.errors[0]
+                mainWindow.displayToast(msg)
+                loadGeofences()
+                if (done) done(st.added, st.replaced, st.errors)
+            }
+            items.forEach(function(it) {
+                var old = mine[it.name.trim().toLowerCase()]
+                var ok  = function() { if (old) st.replaced++; else st.added++; finish() }
+                var bad = function(msg) { st.errors.push(it.name + ": " + msg); finish() }
+                var attrs = {}
+                attrs[geofenceMark] = true
+                attrs.color = color
+                if (old) {
+                    var body = JSON.parse(JSON.stringify(old))
+                    body.name = it.name; body.area = it.area
+                    body.attributes = body.attributes || {}
+                    for (var a in attrs) body.attributes[a] = attrs[a]
+                    _send("PUT", "/api/geofences/" + old.id, body, ok, bad)
+                } else {
+                    _send("POST", "/api/geofences", { name: it.name, area: it.area, attributes: attrs }, ok, bad)
+                }
+            })
+        }, function(msg) { mainWindow.displayToast("Sending geofences needs your Traccar login: " + msg) })
+    }
+
+    // OsmAnd endpoint for points: Settings → Connection 'Send to', else http://<server host>:5055/
+    function osmandUrl() {
+        if (cfg.sendUrl.trim() !== "") {
+            var u = cfg.sendUrl.trim()
+            return u.indexOf("://") >= 0 ? u : "http://" + u
+        }
+        var m = /^[a-z]+:\/\/([^\/:?#]+)/i.exec(cfg.serverUrl)
+        return m ? "http://" + m[1] + ":5055/" : ""
+    }
+
+    // Send lat / lon as a fix of the device called name (time = now). An existing device
+    // (by name or identifier) moves there; a new name adds a device with a qgis-… identifier.
+    function sendPoint(name, lon, lat, done) {
+        var base = osmandUrl()
+        if (base === "") { mainWindow.displayToast("Set up the connection first"); return }
+        name = String(name).trim()
+        var t = Math.floor(Date.now() / 1000)
+        var fix = function(uid) {
+            var url = base + (base.indexOf("?") >= 0 ? "&" : "?") + "id=" + encodeURIComponent(uid)
+                      + "&lat=" + lat.toFixed(7) + "&lon=" + lon.toFixed(7) + "&timestamp=" + t + "&valid=true"
+            var xhr = new XMLHttpRequest()
+            xhr.open("GET", url, true)
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return
+                if (xhr.status === 200) {
+                    mainWindow.displayToast("Sent to Traccar as '" + name + "'")
+                    if (plugin.win !== null && plugin.win.moving) sendRefresh.restart()
+                    if (done) done(true)
+                } else {
+                    mainWindow.displayToast(xhr.status === 0
+                        ? "Send point: no response from " + base + " — check 'Send points to' in Settings → Connection"
+                        : "Traccar refused the point for '" + name + "' (HTTP " + xhr.status + ")")
+                    if (done) done(false)
+                }
+            }
+            xhr.send()
+        }
+        _get("/api/devices", function(devs) {
+            var uid = null      // OsmAnd needs the device's identifier (uniqueId), not its name: accept either
+            devs.forEach(function(d) { if (!uid && d.uniqueId && d.uniqueId === name) uid = d.uniqueId })
+            devs.forEach(function(d) {
+                if (!uid && d.uniqueId && String(d.name || "").trim().toLowerCase() === name.toLowerCase()) uid = d.uniqueId
+            })
+            if (uid) { fix(uid); return }
+            var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").substr(0, 30) || "point"
+            var newUid = sentPointPrefix + slug + "-" + t
+            _send("POST", "/api/devices", { name: name, uniqueId: newUid },
+                  function(d) { fix((d && d.uniqueId) || newUid) },
+                  function(msg) {
+                      mainWindow.displayToast("Couldn't add '" + name + "' to Traccar (" + msg
+                                              + ") — your account may not be allowed to add devices")
+                      if (done) done(false)
+                  })
+        }, function(msg) { mainWindow.displayToast("Send point needs your Traccar login: " + msg) })
+    }
+
+    Timer { id: sendRefresh; interval: 2000; onTriggered: pollLive() }
+
+    // ── Drawing on the map: tap to place a point / circle centre, or corners ──
+    function startDraw(mode) {
+        if (!plugin.isConnected()) { openSettings("connection"); return }
+        plugin.drawPts  = []
+        plugin.drawMode = mode
+        mainDialog.close()
+    }
+
+    function cancelDraw() {
+        plugin.drawMode = ""
+        plugin.drawPts  = []
+    }
+
+    function _screenToLonLat(point) {
+        var ms = plugin.mapCanvas.mapSettings
+        var mp = ms.screenToCoordinate(point)
+        var ll = GeometryUtils.reprojectPoint(GeometryUtils.point(mp.x, mp.y), ms.destinationCrs, plugin.wgs84)
+        return { lon: ll.x, lat: ll.y }
+    }
+
+    function _drawTap(point) {
+        addDrawPoint(_screenToLonLat(point))
+    }
+
+    function addDrawPoint(ll) {
+        if (!ll || !isFinite(ll.lon) || !isFinite(ll.lat)) return
+        plugin.drawPts = plugin.drawPts.concat([ll])
+        if (plugin.drawMode === "point" || plugin.drawMode === "circle") finishDraw()
+    }
+
+    // The phone's GPS position, or null
+    function gpsLonLat() {
+        try {
+            var ps = iface.findItemByObjectName("positionSource")
+            var pi = ps ? ps.positionInformation : null
+            if (pi && pi.latitudeValid && pi.longitudeValid) return { lon: pi.longitude, lat: pi.latitude }
+        } catch(e) {}
+        return null
+    }
+
+    function undoDraw() {
+        plugin.drawPts = plugin.drawPts.slice(0, Math.max(0, plugin.drawPts.length - 1))
+    }
+
+    function canFinishDraw() {
+        return plugin.drawPts.length >= (plugin.drawMode === "area" ? 3 : plugin.drawMode === "line" ? 2 : 1)
+    }
+
+    function finishDraw() {
+        if (!canFinishDraw()) return
+        sendDialog.mode   = plugin.drawMode
+        sendDialog.coords = plugin.drawPts
+        sendDialog.open()
+    }
+
+    // ── From a layer: its features become geofences (points: circles or points) ──
+    // Geometry WKT (any CRS, Z / M, multipart) → [{kind: "polygon" | "line" | "point", coords: [{lon, lat}]}]
+    // in WGS84. Polygons keep their outer ring only (Traccar has no holes); curves are not read.
+    function wktParts(wkt, crs) {
+        var s = String(wkt || "").trim()
+        var head = /^(MULTI)?(POINT|LINESTRING|POLYGON)\s*(ZM|Z|M)?\s*\(/i.exec(s)
+        if (!head) return []
+        var type = head[2].toUpperCase()
+        var toLl = function(text) {
+            var out = []
+            text.split(",").forEach(function(v) {
+                var n = v.trim().split(/\s+/)
+                var x = parseFloat(n[0]), y = parseFloat(n[1])
+                if (!isFinite(x) || !isFinite(y)) return
+                if (crs && crs.authid !== "EPSG:4326") {
+                    var p = GeometryUtils.reprojectPoint(GeometryUtils.point(x, y), crs, plugin.wgs84)
+                    x = p.x; y = p.y
+                }
+                out.push({ lon: x, lat: y })
+            })
+            return out
+        }
+        var parts = [], m
+        if (type === "POLYGON") {
+            var outer = /\(\s*\(\s*([^()]+)\)/g                 // first ring of each polygon
+            while ((m = outer.exec(s)) !== null) parts.push({ kind: "polygon", coords: toLl(m[1]) })
+        } else {
+            var inner = /\(\s*([^()]+)\)/g                      // each innermost list
+            while ((m = inner.exec(s)) !== null) {
+                if (type === "LINESTRING") parts.push({ kind: "line", coords: toLl(m[1]) })
+                else toLl(m[1]).forEach(function(c) { parts.push({ kind: "point", coords: [c] }) })
+            }
+        }
+        return parts.filter(function(p) { return p.coords.length > 0 })
+    }
+
+    function _geomWkt(geom) {
+        try { if (geom && geom.asWkt) return geom.asWkt(7) } catch(e) {}
+        try { if (geom && geom.wkt)   return geom.wkt } catch(e2) {}
+        return ""
+    }
+
+    // Every feature of the layer (or only fid) → sent to Traccar.
+    // asPoints: point features become points (devices) instead of circles.
+    function sendLayer(layerName, fid, nameField, fixedName, radius, color, asPoints) {
+        var lyr = _layerByName(layerName, "Send")
+        if (!lyr) return
+        var items = [], points = [], skipped = 0, n = 0
+        try {
+            var iter = LayerUtils.createFeatureIterator(lyr)
+            while (iter.hasNext()) {
+                var f = iter.next()
+                if (fid >= 0 && f.id !== fid) continue
+                n++
+                var label = ""
+                if (nameField !== "") {
+                    var v = f.attribute(nameField)
+                    label = (v === null || v === undefined) ? "" : String(v).trim()
+                }
+                if (label === "") label = (fixedName || layerName) + (fid >= 0 ? "" : " " + n)
+                var parts = wktParts(_geomWkt(f.geometry), lyr.crs)
+                if (parts.length === 0) { skipped++; continue }
+                for (var j = 0; j < parts.length; j++) {
+                    var p = parts[j]
+                    var nm = parts.length === 1 ? label : label + " (" + (j + 1) + ")"
+                    if (p.kind === "point" && asPoints) { points.push({ name: nm, c: p.coords[0] }); continue }
+                    var a = areaText(p.kind === "point" ? "circle" : p.kind, p.coords, radius)
+                    if (a) items.push({ name: nm, area: a.area })
+                    else   skipped++
+                }
+            }
+            iter.close()
+        } catch(e) {
+            mainWindow.displayToast("Couldn't read '" + layerName + "': " + e)
+            return
+        }
+        if (skipped > 0) mainWindow.displayToast(skipped + " feature(s) skipped: no shape Traccar can take")
+        if (items.length > 0) upsertGeofences(items, color)
+        points.forEach(function(p) { sendPoint(p.name, p.c.lon, p.c.lat) })
+        if (items.length === 0 && points.length === 0 && skipped === 0) mainWindow.displayToast("No features to send")
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -1103,7 +1617,7 @@ Item {
                 Button {
                     text: "Clear"
                     enabled: plugin.win !== null
-                    onClicked: { cfg.liveOn = false; clearWindow(); plugin.statusMsg = "" }
+                    onClicked: { cfg.liveOn = false; clearWindow(); plugin.geofences = []; plugin.statusMsg = "" }
                 }
             }
 
@@ -1115,6 +1629,7 @@ Item {
                 ShowBox { text: "Labels";   checked: cfg.showLabels;   onToggled: cfg.showLabels   = checked }
                 ShowBox { text: "Tracks";   checked: cfg.showTrails;   onToggled: cfg.showTrails   = checked }
                 ShowBox { text: "Accuracy"; checked: cfg.showAccuracy; onToggled: cfg.showAccuracy = checked }
+                ShowBox { text: "Geofences"; checked: cfg.showGeofences; onToggled: cfg.showGeofences = checked }
             }
 
             // ── Devices ───────────────────────────────────────────────────
@@ -1208,7 +1723,112 @@ Item {
                             icon.source: "icons/locate.svg"
                             onClicked: { zoomToDevice(row.pos); mainDialog.close() }
                         }
+                        RowButton {
+                            visible: row.sent             // only points added with Send point (qgis-…)
+                            icon.source: "icons/delete.svg"
+                            onClicked: plugin.confirm("Delete '" + row.name + "' from Traccar?\n\nIt disappears "
+                                                      + "for everyone, with all its positions. This can't be undone.",
+                                                      function() { plugin.deleteSentPoint(row.id) })
+                        }
                     }
+                }
+            }
+
+            // ── Geofences ─────────────────────────────────────────────────
+            ShowBox {
+                id: allGeofencesBox
+                visible: plugin.geofences.length > 0
+                enabled: cfg.showGeofences
+                property int nShown: { var h = plugin._gfHiddenIds()
+                                       return plugin.geofences.filter(function(g) { return !h[String(g.id)] }).length }
+                Layout.fillWidth: true
+                font.bold: true
+                text: "Geofences  (" + (nShown === plugin.geofences.length ? nShown
+                                        : nShown + " of " + plugin.geofences.length + " shown") + ")"
+                checkState: nShown === 0 ? Qt.Unchecked
+                          : nShown === plugin.geofences.length ? Qt.Checked : Qt.PartiallyChecked
+                nextCheckState: function() { return nShown === plugin.geofences.length ? Qt.Unchecked : Qt.Checked }
+                onClicked: plugin.setAllGeofencesShown(checkState === Qt.Checked)
+            }
+            ListView {
+                id: geofenceList
+                visible: plugin.geofences.length > 0
+                enabled: cfg.showGeofences
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(contentHeight, 152)
+                clip:  true
+                model: plugin.geofences
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                delegate: Rectangle {
+                    width:  ListView.view.width
+                    height: 48
+                    color:  index % 2 === 0 ? "#F5F5F5" : "white"
+                    property var g: modelData
+                    property bool shown: { cfg.hiddenGeofences; return !plugin._gfHiddenIds()[String(g.id)] }
+
+                    RowLayout {
+                        anchors { fill: parent; leftMargin: 0; rightMargin: 4 }
+                        spacing: 4
+                        ShowBox {
+                            checked: shown
+                            onToggled: plugin.setGeofenceShown(g.id, checked)
+                        }
+                        Rectangle {                         // tap: change the colour
+                            width: 18; height: 18; radius: 4
+                            color: g.color
+                            opacity: shown ? 1 : 0.4
+                            MouseArea { anchors.fill: parent; anchors.margins: -8; onClicked: colorMenu.openFor(g) }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 4
+                            spacing: 1
+                            opacity: shown ? 1 : 0.5
+                            Label {
+                                text: g.name || "(no name)"
+                                font.bold: true
+                                font.pixelSize: 14
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Label {
+                                text: plugin.geofenceType(g) + "  ·  from " + (g.mine ? "QGIS / QField" : "Traccar")
+                                font.pixelSize: 11
+                                color: "#555"
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                        RowButton {
+                            icon.source: "icons/locate.svg"
+                            onClicked: { plugin.zoomToGeofence(g.id); mainDialog.close() }
+                        }
+                        RowButton {
+                            icon.source: "icons/delete.svg"
+                            onClicked: plugin.confirm("Delete the geofence '" + g.name + "' from Traccar?\n\n"
+                                                      + (g.mine ? "" : "It was made in Traccar, not sent from QGIS or "
+                                                                       + "QField — Traccar alerts may use it.\n\n")
+                                                      + "It disappears for everyone. This can't be undone.",
+                                                      function() { plugin.deleteGeofence(g.id) })
+                        }
+                    }
+                }
+            }
+
+            // ── Add to Traccar ────────────────────────────────────────────
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                Label { text: "Add:"; font.bold: true }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Button { text: "Point";  flat: true; onClicked: plugin.startDraw("point") }
+                    Button { text: "Area";   flat: true; onClicked: plugin.startDraw("area") }
+                    Button { text: "Line";   flat: true; onClicked: plugin.startDraw("line") }
+                    Button { text: "Circle"; flat: true; onClicked: plugin.startDraw("circle") }
+                    Button { text: "From layer…"; flat: true; onClicked: { mainDialog.close(); layerSendDialog.open() } }
                 }
             }
 
@@ -1289,6 +1909,416 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
     //  HELP DIALOG
     // ════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════
+    //  ADD / CHANGE / DELETE IN TRACCAR — dialogs and the drawing bar
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Yes / No before anything is deleted
+    function confirm(text, action) {
+        confirmDialog.text   = text
+        confirmDialog.action = action
+        confirmDialog.open()
+    }
+
+    Dialog {
+        id:      confirmDialog
+        background: DialogBackground {}
+        parent:  mainWindow.contentItem
+        visible: false
+        modal:   true
+        padding: 12
+        width:   Math.min(mainWindow.width * 0.9, 380)
+        x:       (mainWindow.width - width) / 2
+        y:       (mainWindow.height - height) / 2
+        z:       10
+        property string text: ""
+        property var    action: null
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+            Label { text: confirmDialog.text; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button { text: "Cancel"; flat: true; onClicked: confirmDialog.close() }
+                Button {
+                    text: "Delete"
+                    onClicked: {
+                        var a = confirmDialog.action
+                        confirmDialog.action = null
+                        confirmDialog.close()
+                        if (a) a()
+                    }
+                }
+            }
+        }
+    }
+
+    // Tap a geofence's colour in the list → pick another (saved in Traccar)
+    Popup {
+        id: colorMenu
+        parent: mainWindow.contentItem
+        modal:  true
+        padding: 8
+        x: (mainWindow.width - width) / 2
+        y: (mainWindow.height - height) / 2
+        z: 10
+        background: DialogBackground {}
+        property var g: null
+        function openFor(geofence) { g = geofence; open() }
+        Flow {
+            width: 5 * 40
+            spacing: 4
+            Repeater {
+                model: plugin.swatches
+                delegate: Rectangle {
+                    width: 36; height: 36; radius: 6
+                    color: modelData
+                    border.width: colorMenu.g && colorMenu.g.color === modelData ? 3 : 0
+                    border.color: "black"
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: { var g = colorMenu.g; colorMenu.close(); if (g) plugin.setGeofenceColor(g.id, modelData) }
+                    }
+                }
+            }
+        }
+    }
+
+    // Row of colour swatches (geofence colour, remembered)
+    component SwatchRow: Flow {
+        Layout.fillWidth: true
+        spacing: 4
+        Repeater {
+            model: plugin.swatches
+            delegate: Rectangle {
+                width: 30; height: 30; radius: 6
+                color: modelData
+                border.width: cfg.geofenceColor === modelData ? 3 : 0
+                border.color: "black"
+                MouseArea { anchors.fill: parent; onClicked: cfg.geofenceColor = modelData }
+            }
+        }
+    }
+
+    // ── Bar at the top of the map while drawing ───────────────────────────
+    Rectangle {
+        id: drawBar
+        parent:  mainWindow.contentItem
+        visible: plugin.drawMode !== "" && !sendDialog.visible
+        z:       5
+        x:       8
+        y:       plugin.topInset + 8
+        width:   mainWindow.width - 16
+        height:  drawCol.implicitHeight + 16
+        radius:  plugin.cornerRadius
+        color:   "#F2FFFFFF"
+        border.color: Theme.mainColor
+        ColumnLayout {
+            id: drawCol
+            anchors { fill: parent; margins: 8 }
+            spacing: 4
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.bold: true
+                text: {
+                    var n = plugin.drawPts.length
+                    if (plugin.drawMode === "point")  return "Tap the map where the point goes"
+                    if (plugin.drawMode === "circle") return "Tap the map at the centre of the circle"
+                    var what = plugin.drawMode === "area" ? "area" : "line"
+                    return n === 0 ? "Tap the map at each corner of the " + what
+                                   : n + " corner" + (n === 1 ? "" : "s") + " — tap the next, then Done"
+                }
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 4
+                Button {
+                    text: "My location"
+                    flat: true
+                    enabled: plugin.gpsLonLat() !== null
+                    onClicked: plugin.addDrawPoint(plugin.gpsLonLat())
+                }
+                Button {
+                    visible: plugin.drawMode === "area" || plugin.drawMode === "line"
+                    text: "Undo"
+                    flat: true
+                    enabled: plugin.drawPts.length > 0
+                    onClicked: plugin.undoDraw()
+                }
+                Button {
+                    visible: plugin.drawMode === "area" || plugin.drawMode === "line"
+                    text: "Done"
+                    enabled: plugin.canFinishDraw()
+                    onClicked: plugin.finishDraw()
+                }
+                Button { text: "Cancel"; flat: true; onClicked: plugin.cancelDraw() }
+            }
+        }
+    }
+
+    // ── Name (and radius / colour), then send ─────────────────────────────
+    Dialog {
+        id:      sendDialog
+        background: DialogBackground {}
+        parent:  mainWindow.contentItem
+        visible: false
+        modal:   true
+        padding: 12
+        width:   Math.min(mainWindow.width * 0.93, 400)
+        x:       (mainWindow.width - width) / 2
+        y:       plugin.topInset + 12
+        property string mode: "point"     // point, circle, area, line
+        property var    coords: []
+        property bool   sent: false
+        property alias  nameText: sendName.text
+
+        header: HeaderBar {
+            RowLayout {
+                anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
+                Label {
+                    text: sendDialog.mode === "point" ? "Send point" : "Send "
+                          + ({ circle: "circle", area: "area", line: "line" })[sendDialog.mode] + " as a geofence"
+                    color: "white"; font.pixelSize: 17; font.bold: true
+                    Layout.fillWidth: true
+                }
+                HeaderButton { icon.source: "icons/close.svg"; onClicked: sendDialog.close() }
+            }
+        }
+
+        onOpened: {
+            sent = false
+            sendName.text = mode === "point" ? cfg.lastSendName : ""
+            sendRadius.value = cfg.circleRadius
+            sendName.forceActiveFocus()
+        }
+        // Closed without sending (Cancel / ✕): back to drawing — tap again, or the corners kept
+        onClosed: if (!sent && (mode === "point" || mode === "circle")) plugin.drawPts = []
+
+        function send() {
+            var name = sendName.text.trim()
+            if (name === "") { mainWindow.displayToast("Give it a name first"); return }
+            if (mode === "point") {
+                cfg.lastSendName = name
+                plugin.sendPoint(name, coords[0].lon, coords[0].lat)
+            } else {
+                cfg.circleRadius = sendRadius.value
+                var a = plugin.areaText(mode === "area" ? "polygon" : mode, coords, sendRadius.value)
+                if (!a) { mainWindow.displayToast("Not enough corners"); return }
+                plugin.upsertGeofences([{ name: name, area: a.area }], cfg.geofenceColor)
+            }
+            sent = true
+            plugin.cancelDraw()
+            close()
+        }
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 6
+            Hint {
+                text: sendDialog.coords.length === 0 ? ""
+                      : sendDialog.mode === "point" || sendDialog.mode === "circle"
+                        ? (sendDialog.mode === "circle" ? "Centre: " : "At: ")
+                          + plugin._locationText({ latitude: sendDialog.coords[0].lat, longitude: sendDialog.coords[0].lon })
+                        : sendDialog.coords.length + " corners"
+            }
+            Label { text: "Name" }
+            TextField {
+                id: sendName
+                Layout.fillWidth: true
+                placeholderText: sendDialog.mode === "point" ? "e.g. Team 2 or Clue 4" : "e.g. Sector A"
+                onAccepted: sendDialog.send()
+            }
+            Hint {
+                visible: sendDialog.mode === "point"
+                text: "A new name adds a new point (device) in Traccar; the name of an existing device moves it here."
+            }
+            Hint {
+                visible: sendDialog.mode !== "point"
+                text: "A geofence sent from QGIS or QField before with the same name is replaced."
+            }
+            RowLayout {
+                visible: sendDialog.mode === "circle"
+                Layout.fillWidth: true
+                Label { text: "Radius" }
+                SpinBox {
+                    id: sendRadius
+                    from: 10; to: 100000; stepSize: 50; editable: true
+                    Layout.fillWidth: true
+                }
+                Label { text: "m" }
+            }
+            Flow {
+                visible: sendDialog.mode === "circle"
+                Layout.fillWidth: true
+                spacing: 4
+                Repeater {
+                    model: [250, 500, 1000]
+                    delegate: Button { text: modelData + " m"; flat: true; onClicked: sendRadius.value = modelData }
+                }
+            }
+            Label { visible: sendDialog.mode !== "point"; text: "Colour" }
+            SwatchRow { visible: sendDialog.mode !== "point" }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                Item { Layout.fillWidth: true }
+                Button { text: "Cancel"; flat: true; onClicked: sendDialog.close() }
+                Button { text: "Send to Traccar"; onClicked: sendDialog.send() }
+            }
+        }
+    }
+
+    // ── Send a layer's features ───────────────────────────────────────────
+    ListModel { id: sendLayerModel }     // layers with points, lines or polygons
+    ListModel { id: sendFieldModel }     // fields of that layer (name from)
+    ListModel { id: sendFeatureModel }   // "All features" + each feature
+
+    Dialog {
+        id:      layerSendDialog
+        background: DialogBackground {}
+        parent:  mainWindow.contentItem
+        visible: false
+        modal:   true
+        padding: 10
+        width:   plugin.phone ? mainWindow.width * 0.93 : Math.min(mainWindow.width * 0.84, 428)
+        height:  Math.min(mainWindow.height - plugin.topInset - plugin.bottomInset - 24, 560)
+        x:       (mainWindow.width - width) / 2
+        y:       plugin.topInset + (mainWindow.height - plugin.topInset - plugin.bottomInset - height) / 2
+        property string layerName: ""
+        property int    geomType: -1
+
+        header: HeaderBar {
+            RowLayout {
+                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                HeaderButton { icon.source: "icons/back.svg"; onClicked: layerSendDialog.close() }
+                Label {
+                    text: "Send from a layer"
+                    color: "white"; font.pixelSize: 17; font.bold: true
+                    Layout.fillWidth: true
+                }
+            }
+        }
+        onOpened: {
+            sendLayerModel.clear()
+            sendLayerModel.append({ name: "— choose a layer —", isHeader: false })
+            var layers = ProjectUtils.mapLayers(qgisProject), names = []
+            for (var id in layers) {
+                try {
+                    var t = layers[id].geometryType()
+                    if (t === Qgis.GeometryType.Point || t === Qgis.GeometryType.Line || t === Qgis.GeometryType.Polygon)
+                        names.push(layers[id].name)
+                } catch(e) {}
+            }
+            names.sort(function(a, b) { return a.localeCompare(b) })
+            names.forEach(function(n) { sendLayerModel.append({ name: n, isHeader: false }) })
+            restoreSelection(sendLayerCombo, sendLayerModel, layerName)
+            if (sendLayerCombo.currentIndex < 0) sendLayerCombo.currentIndex = 0
+            layerChosen()
+            sendLayerRadius.value = cfg.circleRadius
+        }
+        onClosed: mainDialog.open()
+
+        function layerChosen() {
+            layerName = pickedName(sendLayerCombo, sendLayerModel)
+            var layers = layerName !== "" ? qgisProject.mapLayersByName(layerName) : []
+            geomType = layers.length > 0 ? layers[0].geometryType() : -1
+            populateEventFields(sendFieldModel, layerName)
+            var fn = layers.length > 0 ? layers[0].fields.names : []
+            var guess = ["name", "title", "sector", "sector_id", "incident_ref"]
+            sendFieldCombo.currentIndex = 0
+            for (var i = 0; i < guess.length && sendFieldCombo.currentIndex === 0; i++)
+                if (fn.indexOf(guess[i]) >= 0) restoreSelection(sendFieldCombo, sendFieldModel, guess[i])
+            if (sendFieldCombo.currentIndex < 0) sendFieldCombo.currentIndex = 0
+            fillFeatures()
+        }
+
+        function fillFeatures() {
+            sendFeatureModel.clear()
+            var layers = layerName !== "" ? qgisProject.mapLayersByName(layerName) : []
+            if (layers.length === 0) return
+            var field = pickedName(sendFieldCombo, sendFieldModel)
+            var rows = []
+            try {
+                var iter = LayerUtils.createFeatureIterator(layers[0])
+                while (iter.hasNext()) {
+                    var f = iter.next()
+                    var v = field !== "" ? f.attribute(field) : null
+                    rows.push({ label: (v !== null && v !== undefined && String(v) !== "") ? String(v) : "#" + f.id, fid: f.id })
+                }
+                iter.close()
+            } catch(e) {}
+            sendFeatureModel.append({ label: "All " + rows.length + " feature(s)", fid: -1 })
+            rows.forEach(function(r) { sendFeatureModel.append(r) })
+            sendFeatureCombo.currentIndex = 0
+        }
+
+        ScrollView {
+            id: layerSendScroll
+            anchors.fill: parent
+            contentWidth: availableWidth
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ColumnLayout {
+                width: layerSendScroll.availableWidth
+                spacing: 6
+                Hint { text: "Areas and lines become geofences in Traccar; points become circles or points (devices)." }
+                Label { text: "Layer" }
+                PickCombo {
+                    id: sendLayerCombo
+                    model: sendLayerModel
+                    onActivated: layerSendDialog.layerChosen()
+                }
+                Label { text: "Name from field" }
+                PickCombo {
+                    id: sendFieldCombo
+                    model: sendFieldModel
+                    onActivated: layerSendDialog.fillFeatures()
+                }
+                Label { text: "… or name (numbered if several)" }
+                TextField { id: sendLayerName; Layout.fillWidth: true; placeholderText: "the layer's name" }
+                Label { text: "Features" }
+                ComboBox {
+                    id: sendFeatureCombo
+                    Layout.fillWidth: true
+                    model: sendFeatureModel
+                    textRole: "label"
+                }
+                ColumnLayout {
+                    visible: layerSendDialog.geomType === Qgis.GeometryType.Point
+                    Layout.fillWidth: true
+                    spacing: 2
+                    RadioButton { id: asCircles; text: "As circles (geofences)"; checked: true }
+                    RadioButton { id: asPoints;  text: "As points (devices)" }
+                    RowLayout {
+                        visible: asCircles.checked
+                        Label { text: "Radius" }
+                        SpinBox { id: sendLayerRadius; from: 10; to: 100000; stepSize: 50; editable: true }
+                        Label { text: "m" }
+                    }
+                }
+                Label { visible: !(layerSendDialog.geomType === Qgis.GeometryType.Point && asPoints.checked); text: "Colour" }
+                SwatchRow { visible: !(layerSendDialog.geomType === Qgis.GeometryType.Point && asPoints.checked) }
+                Button {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 6
+                    text: "Send to Traccar"
+                    enabled: layerSendDialog.layerName !== ""
+                    onClicked: {
+                        var pt = layerSendDialog.geomType === Qgis.GeometryType.Point
+                        if (pt && asCircles.checked) cfg.circleRadius = sendLayerRadius.value
+                        var fid = sendFeatureCombo.currentIndex > 0 ? sendFeatureModel.get(sendFeatureCombo.currentIndex).fid : -1
+                        plugin.sendLayer(layerSendDialog.layerName, fid, pickedName(sendFieldCombo, sendFieldModel),
+                                         sendLayerName.text.trim(), sendLayerRadius.value, cfg.geofenceColor,
+                                         pt && asPoints.checked)
+                        layerSendDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
     Dialog {
         id:      helpDialog
         background: DialogBackground {}
@@ -1370,6 +2400,24 @@ Item {
                           "Save buttons (remembered); the tick next to 'Devices' shows or hides them all. " +
                           "The target button centres the map on a device and the copy button copies its location — " +
                           "lat / long, degrees + minutes, Irish Grid, UK Grid or the project CRS (Settings → Advanced)."
+                }
+
+                Label { text: "Geofences and points in Traccar"; font.bold: true; font.pixelSize: 15 }
+                Hint {
+                    color: Theme.mainTextColor
+                    text: "Traccar's geofences (areas, lines, circles) are drawn on the map in their own colour, " +
+                          "with their names — they never go grey. Tick Geofences under Show to switch them all on " +
+                          "or off; in the Geofences list, untick one to hide it, tap its colour to change it " +
+                          "(saved in Traccar), the target to centre the map on it, or the bin to delete it from " +
+                          "Traccar (you're asked first).\n" +
+                          "Add → Point / Circle: tap the map (or 'My location'), give a name. A point becomes a " +
+                          "device in Traccar — a new name adds one, an existing device's name moves it there. " +
+                          "Points added this way can be deleted from the device list.\n" +
+                          "Add → Area / Line: tap each corner, then Done, name it and pick a colour.\n" +
+                          "Add → From layer: send a layer's features (all or one), named from a field — areas and " +
+                          "lines become geofences, points become circles or points.\n" +
+                          "Sending a geofence with the same name as one sent from QGIS or QField before replaces " +
+                          "it. Adding and deleting needs a Traccar account that is allowed to change them."
                 }
 
                 Label { text: "Saving"; font.bold: true; font.pixelSize: 15 }
@@ -1476,6 +2524,7 @@ Item {
                 plugin.connState = ""
             }
             if (sessionTagField.text.trim() !== cfg.sessionTag) cfg.sessionTag = sessionTagField.text.trim()
+            if (sendUrlField.text.trim() !== cfg.sendUrl) cfg.sendUrl = sendUrlField.text.trim()
         }
 
         function loadControls() {
@@ -1483,6 +2532,7 @@ Item {
             userField.text       = cfg.username
             passField.text       = cfg.password
             sessionTagField.text = cfg.sessionTag
+            sendUrlField.text    = cfg.sendUrl
             if (page === "layers") {
                 populateLayers(ptLayerModel, Qgis.GeometryType.Point)
                 restoreSelection(pointsLayerCombo, ptLayerModel, cfg.pointsLayerName)
@@ -1629,6 +2679,18 @@ Item {
                         color: plugin.connState === "ok" ? "#2E7D32" : "#B71C1C"
                     }
                     Hint { text: "Use the same address you open in a browser for Traccar." }
+                    Label { text: "Send points to"; Layout.topMargin: 8 }
+                    TextField {
+                        id: sendUrlField
+                        Layout.fillWidth: true
+                        placeholderText:  plugin.osmandUrl() !== "" ? plugin.osmandUrl() : "http://<server>:5055"
+                        inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Hint {
+                        text: "Points (Add → Point) go to Traccar's OsmAnd port. Leave blank for port 5055 on the "
+                              + "server above; fill it in if your server uses another port or address."
+                    }
                 }
 
                 // ══ Layers ═════════════════════════════════════════════════
@@ -1987,6 +3049,7 @@ Item {
             var lookup = _lookupFromDevices(devData)
             plugin.deviceInfo = lookup
             plugin.connState  = "ok"
+            loadGeofences()
             _get("/api/positions", function(posData) {
                 var latest = {}
                 posData.forEach(function(p) { if (_valid(p)) latest[String(p.deviceId)] = p })
@@ -2090,7 +3153,7 @@ Item {
     function _lookupFromDevices(devData) {
         var lookup = {}
         devData.forEach(function(d) {
-            lookup[d.id] = { name: d.name || String(d.id), status: d.status || "unknown" }
+            lookup[d.id] = { name: d.name || String(d.id), status: d.status || "unknown", uniqueId: d.uniqueId || "" }
         })
         return lookup
     }
@@ -2164,7 +3227,8 @@ Item {
                 if (a.batteryLevel !== undefined && a.batteryLevel !== null) line += "  ·  batt " + a.batteryLevel + "%"
             }
             rows.push({ id: key, name: dname, line: line, pos: pos, shown: !hidden[key],
-                        color: pos ? colorOf(key, pos.fixTime) : "#9E9E9E" })
+                        color: pos ? colorOf(key, pos.fixTime) : "#9E9E9E",
+                        sent: String(plugin.deviceInfo[devId].uniqueId || "").indexOf(sentPointPrefix) === 0 })
         }
         rows.sort(function(r1, r2) { return r1.name.localeCompare(r2.name) })
         plugin.deviceRows = rows
@@ -2592,33 +3656,44 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
 
     function _get(path, callback, onError) {
+        _send("GET", path, null, callback, onError)
+    }
+
+    // method: GET, POST, PUT or DELETE; body: object sent as JSON, or null.
+    // callback gets the reply's JSON (null for an empty reply, e.g. after DELETE).
+    function _send(method, path, body, callback, onError) {
         var fail = function(msg) {
             if (onError) onError(msg)
             else         mainWindow.displayToast(msg)
         }
         var xhr = new XMLHttpRequest()
         var url = cfg.serverUrl + path
-        xhr.open("GET", url, true)
+        xhr.open(method, url, true)
         xhr.setRequestHeader("Authorization", "Basic " + _btoa(cfg.username + ":" + cfg.password))
         xhr.setRequestHeader("Accept",        "application/json")
+        if (body !== null && body !== undefined) xhr.setRequestHeader("Content-Type", "application/json")
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            if (xhr.status === 200) {
-                var data
-                try {
-                    data = JSON.parse(xhr.responseText)
-                } catch(e) {
-                    fail("Parse error: " + e)
-                    return
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var data = null
+                if (xhr.responseText !== "") {
+                    try {
+                        data = JSON.parse(xhr.responseText)
+                    } catch(e) {
+                        fail("Parse error: " + e)
+                        return
+                    }
                 }
                 callback(data)
             } else if (xhr.status === 0) {
                 fail("No response — check server URL and connectivity")
             } else {
                 fail("HTTP " + xhr.status +
-                     (xhr.status === 401 ? " — wrong username/password" : " on " + path.split("?")[0]))
+                     (xhr.status === 401 ? " — wrong username/password"
+                      : xhr.status === 400 && xhr.responseText ? ": " + xhr.responseText.split("\n")[0].substr(0, 120)
+                      : " on " + path.split("?")[0]))
             }
         }
-        xhr.send()
+        xhr.send(body !== null && body !== undefined ? JSON.stringify(body) : null)
     }
 }

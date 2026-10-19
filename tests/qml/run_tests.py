@@ -40,9 +40,9 @@ MAIN = os.environ.get("TRACCAR_MAIN_QML") or os.path.abspath(os.path.join(HERE, 
 # ── Fake Traccar server ──────────────────────────────────────────────────────
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 USER, PWD = "test@example.com", "secret"  # pragma: allowlist secret  (fake server)
-DEVICES = [{"id": 1, "name": "Phone A", "status": "online"},
-           {"id": 2, "name": "Van 3", "status": "offline"},
-           {"id": 3, "name": "Spare", "status": "unknown"}]
+DEVICES = [{"id": 1, "name": "Phone A", "uniqueId": "352000000000001", "status": "online"},
+           {"id": 2, "name": "Van 3", "uniqueId": "van3", "status": "offline"},
+           {"id": 3, "name": "Spare", "uniqueId": "spare", "status": "unknown"}]
 
 
 def _fix(dev, t, lon, lat, i):
@@ -63,6 +63,16 @@ def _p(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+GEOFENCES = [   # one made in Traccar (own colour), one sent from QGIS before
+    {"id": 7, "name": "Lake sector", "description": "", "calendarId": 0,
+     "area": "POLYGON ((53.36 -6.34, 53.37 -6.34, 53.37 -6.32, 53.36 -6.32, 53.36 -6.34))",
+     "attributes": {"color": "#1565c0"}},
+    {"id": 8, "name": "Trail", "description": "", "calendarId": 0,
+     "area": "LINESTRING (53.35 -6.30, 53.355 -6.29)", "attributes": {"createdByTraccarLiveQgis": True}},
+]
+OSMAND = []     # fixes received on the OsmAnd port
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
@@ -75,9 +85,69 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _authed(self):
+        auth = "Basic " + base64.b64encode(("%s:%s" % (USER, PWD)).encode()).decode()
+        if self.headers.get("Authorization", "") == auth:
+            return True
+        self._send(401)
+        return False
+
+    def _body(self):
+        return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"null")
+
+    def do_POST(self):
+        if not self._authed():
+            return
+        body = self._body()
+        if self.path == "/api/geofences":
+            g = dict(body, id=max([g["id"] for g in GEOFENCES] + [0]) + 1)
+            GEOFENCES.append(g)
+            return self._send(200, g)
+        if self.path == "/api/devices":
+            d = {"id": max(d["id"] for d in DEVICES) + 1, "name": body["name"], "uniqueId": body["uniqueId"],
+                 "status": "unknown"}
+            DEVICES.append(d)
+            POS[d["id"]] = []
+            return self._send(200, d)
+        self._send(404)
+
+    def do_PUT(self):
+        if not self._authed():
+            return
+        gid = int(self.path.rsplit("/", 1)[-1]) if self.path.startswith("/api/geofences/") else None
+        for i, g in enumerate(GEOFENCES):
+            if g["id"] == gid:
+                GEOFENCES[i] = self._body()
+                return self._send(200, GEOFENCES[i])
+        self._send(404)
+
+    def do_DELETE(self):
+        if not self._authed():
+            return
+        kind, _, num = self.path.rpartition("/")
+        if kind == "/api/geofences":
+            GEOFENCES[:] = [g for g in GEOFENCES if g["id"] != int(num)]
+        elif kind == "/api/devices":
+            DEVICES[:] = [d for d in DEVICES if d["id"] != int(num)]
+            POS.pop(int(num), None)
+        else:
+            return self._send(404)
+        self.send_response(204)
+        self.end_headers()
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if u.path == "/osmand/":                        # Traccar's OsmAnd port: no login, device by identifier
+            d = next((d for d in DEVICES if d.get("uniqueId") == q.get("id", [""])[0]), None)
+            if d is None:
+                return self._send(400)
+            t = datetime.fromtimestamp(int(q["timestamp"][0]), timezone.utc)
+            OSMAND.append(q)
+            POS[d["id"]].append(_fix(d["id"], t, float(q["lon"][0]), float(q["lat"][0]), len(POS[d["id"]])))
+            return self._send(200)
+        if u.path == "/test/state":                     # test hook: what the server holds now
+            return self._send(200, {"geofences": GEOFENCES, "devices": DEVICES, "osmand": len(OSMAND)})
         if u.path == "/test/addfix":                    # test hook: a new live fix
             d = int(q["dev"][0])
             n = len(POS[d])
@@ -85,9 +155,10 @@ class Handler(BaseHTTPRequestHandler):
             t = max(datetime.now(timezone.utc) - timedelta(seconds=1), last + timedelta(seconds=1))
             POS[d].append(_fix(d, t, -6.31, 53.365, 1000 + n))
             return self._send(200, {})
-        auth = "Basic " + base64.b64encode(("%s:%s" % (USER, PWD)).encode()).decode()
-        if self.headers.get("Authorization", "") != auth:
-            return self._send(401)
+        if not self._authed():
+            return
+        if u.path == "/api/geofences":
+            return self._send(200, GEOFENCES)
         if u.path == "/api/devices":
             return self._send(200, DEVICES)
         if u.path == "/api/positions" and "deviceId" in q:
