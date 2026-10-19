@@ -9,7 +9,10 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 - **A sent geofence stays on the map** while Traccar saves it — *sending…* in the Geofences tab —
   instead of vanishing until the reload; Traccar's copy then replaces it (or, if Traccar refused it, it
   goes). Its edit / colour / delete buttons wait until it's saved. Same as the QGIS plugin.
-- Tests: 118 checks.
+- **A sent point shows at once too**: a dashed ring in the device's colour and "*name* (sending…)",
+  until the first refresh or Live update after Traccar accepted it — then the real marker is there (in a
+  past time window it simply goes). If Traccar refuses the point, it goes at once.
+- Tests: 122 checks.
 
 # v0.7.1 — Phones: fits the screen, tap to add, long-press to send
 

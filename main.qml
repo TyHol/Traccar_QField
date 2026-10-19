@@ -149,6 +149,8 @@ Item {
     property var    geofences:    []      // Traccar geofences: {id, name, area, mine, raw, color, kind, coords, radius}
     property string drawMode:     ""      // "" or what a map tap adds: "point", "circle", "area", "line"
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
+    property var    pendingPoints: []     // points just sent: {key, name, lon, lat, confirmed} — drawn until a refresh
+    property int    pendingSeq:   0
     property var    groups:       []      // Traccar groups and calendars, for the send form
     property var    calendars:    []
 
@@ -796,6 +798,49 @@ Item {
             }
         }
 
+        // ── Points just sent: a dashed ring and "name (sending…)" until a refresh ──
+        Repeater {
+            model: plugin.pendingPoints
+            delegate: Item {
+                id: pend
+                property var   mp: { plugin.crsTick; return plugin._toMapPoint(modelData.lon, modelData.lat) }
+                property point sp: { plugin.mapTick; return plugin.mapCanvas.mapSettings.coordinateToScreen(mp) }
+                property color c:  plugin._deviceColor(modelData.name)
+                x: sp.x
+                y: sp.y
+                width: 0; height: 0
+                Shape {
+                    x: -11; y: -11
+                    width: 22; height: 22
+                    ShapePath {
+                        strokeColor: pend.c
+                        strokeWidth: 3
+                        strokeStyle: ShapePath.DashLine
+                        dashPattern: [2, 2]
+                        fillColor:   Qt.rgba(pend.c.r, pend.c.g, pend.c.b, 0.35)
+                        PathAngleArc { centerX: 11; centerY: 11; radiusX: 9; radiusY: 9; startAngle: 0; sweepAngle: 360 }
+                    }
+                }
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y:      -32
+                    width:  pendLabel.contentWidth + 6
+                    height: pendLabel.contentHeight + 2
+                    radius: 3
+                    color:  "#E6FFFFFF"
+                    Label {
+                        id: pendLabel
+                        anchors.centerIn: parent
+                        text:           modelData.name + " (sending…)"
+                        font.pixelSize: 11
+                        font.bold:      true
+                        font.italic:    true
+                        color:          pend.c
+                    }
+                }
+            }
+        }
+
         // ── Tracks: the fixes inside the time window ──────────────────────
         Repeater {
             model: cfg.showTrails ? plugin.trackModel : []
@@ -1312,6 +1357,7 @@ Item {
         if (base === "") { mainWindow.displayToast("Set up the connection first"); return }
         name = String(name).trim()
         var t = Math.floor(Date.now() / 1000)
+        var key = _addPending(name, lon, lat)
         var fix = function(uid) {
             var url = base + (base.indexOf("?") >= 0 ? "&" : "?") + "id=" + encodeURIComponent(uid)
                       + "&lat=" + lat.toFixed(7) + "&lon=" + lon.toFixed(7) + "&timestamp=" + t + "&valid=true"
@@ -1320,10 +1366,12 @@ Item {
             xhr.onreadystatechange = function() {
                 if (xhr.readyState !== XMLHttpRequest.DONE) return
                 if (xhr.status === 200) {
+                    _confirmPending(key)
                     mainWindow.displayToast("Sent to Traccar as '" + name + "'")
                     if (plugin.win !== null && plugin.win.moving) sendRefresh.restart()
                     if (done) done(true)
                 } else {
+                    _dropPending(key)
                     mainWindow.displayToast(xhr.status === 0
                         ? "Send point: no response from " + base + " — check 'Send points to' in Settings → Connection"
                         : "Traccar refused the point for '" + name + "' (HTTP " + xhr.status + ")")
@@ -1348,14 +1396,35 @@ Item {
             _send("POST", "/api/devices", body,
                   function(d) { fix((d && d.uniqueId) || newUid) },
                   function(msg) {
+                      _dropPending(key)
                       mainWindow.displayToast("Couldn't add '" + name + "' to Traccar (" + msg
                                               + ") — your account may not be allowed to add devices")
                       if (done) done(false)
                   })
-        }, function(msg) { mainWindow.displayToast("Send point needs your Traccar login: " + msg) })
+        }, function(msg) { _dropPending(key); mainWindow.displayToast("Send point needs your Traccar login: " + msg) })
     }
 
     Timer { id: sendRefresh; interval: 2000; onTriggered: pollLive() }
+
+    // ── Points being sent: shown at once, until a refresh after Traccar accepted them ──
+    function _addPending(name, lon, lat) {
+        plugin.pendingSeq++
+        plugin.pendingPoints = plugin.pendingPoints.concat([{ key: plugin.pendingSeq, name: name, lon: lon, lat: lat,
+                                                              confirmed: 0 }])
+        return plugin.pendingSeq
+    }
+    function _dropPending(key) {
+        plugin.pendingPoints = plugin.pendingPoints.filter(function(m) { return m.key !== key })
+    }
+    function _confirmPending(key) {
+        plugin.pendingPoints = plugin.pendingPoints.map(function(m) {
+            return m.key === key ? { key: m.key, name: m.name, lon: m.lon, lat: m.lat, confirmed: Date.now() } : m })
+    }
+    // A refresh that started after Traccar accepted a point shows the real device: drop its stand-in
+    function _settlePending(fetchStarted) {
+        var keep = plugin.pendingPoints.filter(function(m) { return m.confirmed === 0 || m.confirmed > fetchStarted })
+        if (keep.length !== plugin.pendingPoints.length) plugin.pendingPoints = keep
+    }
 
     // ── Drawing on the map: tap to place a point / circle centre, or corners ──
     function startDraw(mode) {
@@ -1811,7 +1880,7 @@ Item {
                     icon.source: "icons/clear.svg"
                     display: plugin.phone ? AbstractButton.IconOnly : AbstractButton.TextOnly   // room for Live on a phone
                     enabled: plugin.win !== null
-                    onClicked: { cfg.liveOn = false; clearWindow(); plugin.geofences = []; plugin.statusMsg = "" }
+                    onClicked: { cfg.liveOn = false; clearWindow(); plugin.geofences = []; plugin.pendingPoints = []; plugin.statusMsg = "" }
                 }
                 Button {                            // same Add menu as the QGIS plugin
                     id: addButton
@@ -3510,6 +3579,7 @@ Item {
         var w = _computeWindow()
         if (w.error) { plugin.statusMsg = w.error; plugin.loading = false; return }
         var gen = ++plugin.loadGen
+        var started = Date.now()
         plugin.statusMsg   = "Loading…"
         plugin.loading     = true
         plugin.loadStarted = Date.now()
@@ -3545,6 +3615,7 @@ Item {
                     plugin.latest      = latest
                     plugin.lastFetched = Qt.formatTime(new Date(), "HH:mm:ss")
                     _rebuildAll()
+                    _settlePending(started)
                 }
                 if (pending === 0) { pending = 1; done(); return }
                 ids.forEach(function(devId) {
@@ -3573,6 +3644,7 @@ Item {
         if (!plugin.win.moving) return
 
         var gen   = plugin.loadGen
+        var started = Date.now()
         var stale = function() { return gen !== plugin.loadGen || plugin.loading || plugin.win === null }
         var onErr = function(msg) { if (!stale()) plugin.liveError = msg }
         _get("/api/devices", function(devData) {
@@ -3615,6 +3687,7 @@ Item {
                 plugin.liveError   = ""
                 plugin.lastFetched = Qt.formatTime(now, "HH:mm:ss")
                 _rebuildAll()
+                _settlePending(started)
             }, onErr)
         }, onErr)
     }

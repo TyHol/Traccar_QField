@@ -718,7 +718,14 @@ ApplicationWindow {
             check("Add → Point: one tap opens the name dialog", d && d.mode === "point")
             d.nameText = "Clue 4"
             d.send()
+            check("sent point shown at once: 'Clue 4 (sending…)' on the map",
+                  plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" && m.confirmed === 0 }))
             waitFor("fix on the OsmAnd port", function() { return toasts[toasts.length - 1].indexOf("Clue 4") >= 0 })
+        },
+        function() {
+            check("…still shown once Traccar accepts it",
+                  plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" && m.confirmed > 0 }))
+            sleep(50)
         },
         function() { fetchState() },
         function() {
@@ -741,6 +748,18 @@ ApplicationWindow {
             var row = plugin.deviceRows.filter(function(r) { return r.name === "Clue 4" })[0]
             var ph  = plugin.deviceRows.filter(function(r) { return r.name === "Phone A" })[0]
             check("sent point listed and deletable; other devices not", row && row.sent && row.pos !== null && !ph.sent)
+            check("…its stand-in gone after the refresh (the real marker is there)",
+                  !plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" })
+                  && plugin.overlayModel.some(function(m) { return m.name === "Clue 4" }))
+            L.keepSendUrl = cfg.sendUrl
+            cfg.sendUrl = serverUrl + "/nope/"         // not an OsmAnd port: the fix is refused
+            plugin.sendPoint("Van 3", -6.307, 53.364)      // an existing device: nothing is added
+            check("refused point: shown while sending…", plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }))
+            waitFor("refused point's marker gone", function() {
+                return !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }) })
+        },
+        function() {
+            cfg.sendUrl = L.keepSendUrl
             toolbarRow.children[0].clicked()        // draw the lists with geofences and a sent point
             sleep(200)
         },
