@@ -4,6 +4,13 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
+# v0.7.2 (in development)
+
+- **A sent geofence stays on the map** while Traccar saves it — *sending…* in the Geofences tab —
+  instead of vanishing until the reload; Traccar's copy then replaces it (or, if Traccar refused it, it
+  goes). Its edit / colour / delete buttons wait until it's saved. Same as the QGIS plugin.
+- Tests: 118 checks.
+
 # v0.7.1 — Phones: fits the screen, tap to add, long-press to send
 
 - **Nothing spills off the right of the main window on a phone.** Buttons and tick boxes squeezed into a

@@ -1,5 +1,5 @@
 /**
- * Traccar Live – QField Plugin  v0.7.1
+ * Traccar Live – QField Plugin  v0.7.2
  *
  * One time window drives everything: the tracks drawn on the map are the fixes
  * inside the window, and "Save tracks" / "Save positions" write exactly what is
@@ -1088,21 +1088,7 @@ Item {
     function loadGeofences() {
         if (cfg.username === "") return
         _get("/api/geofences", function(data) {
-            var out = []
-            data.forEach(function(g) {
-                var attrs  = g.attributes || {}
-                var parsed = parseArea(g.area) || { kind: "", coords: [], radius: 0 }
-                var c = parsed.coords
-                var lp = parsed.kind === "circle" ? parsed.centre
-                       : parsed.kind === "line"   ? c[Math.floor(c.length / 2)]
-                       : _ringMiddle(c)
-                out.push({ id: g.id, name: g.name || "", area: g.area || "", mine: attrs[geofenceMark] === true,
-                           raw: g, color: _normColor(attrs.color) || defaultGfColor,
-                           kind: parsed.kind, coords: c, radius: parsed.radius,
-                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0, centre: parsed.centre || null,
-                           description: g.description || "",
-                           speedKmh: attrs.speedLimit ? Math.round(attrs.speedLimit * 1.852) : 0 })
-            })
+            var out = data.map(function(g) { return _gfEntry(g, false) })
             out.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) })
             plugin.geofences = out
         }, function(msg) { console.log("Traccar Live: geofences: " + msg) })
@@ -1110,6 +1096,41 @@ Item {
         var byName = function(a, b) { return String(a.name || "").toLowerCase().localeCompare(String(b.name || "").toLowerCase()) }
         _get("/api/groups",    function(d) { plugin.groups    = (d || []).sort(byName) }, function() {})
         _get("/api/calendars", function(d) { plugin.calendars = (d || []).sort(byName) }, function() {})
+    }
+
+    // A geofence from Traccar (its JSON) → an entry of plugin.geofences. pending: being sent, not
+    // in Traccar yet (shown straight away; the reload after sending replaces it).
+    function _gfEntry(g, pending) {
+        var attrs  = g.attributes || {}
+        var parsed = parseArea(g.area) || { kind: "", coords: [], radius: 0 }
+        var c = parsed.coords
+        var lp = parsed.kind === "circle" ? parsed.centre
+               : parsed.kind === "line"   ? c[Math.floor(c.length / 2)]
+               : _ringMiddle(c)
+        return { id: g.id, name: g.name || "", area: g.area || "", mine: attrs[geofenceMark] === true,
+                 raw: g, color: _normColor(attrs.color) || defaultGfColor,
+                 kind: parsed.kind, coords: c, radius: parsed.radius,
+                 labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0, centre: parsed.centre || null,
+                 description: g.description || "",
+                 speedKmh: attrs.speedLimit ? Math.round(attrs.speedLimit * 1.852) : 0, pending: pending === true }
+    }
+
+    // Geofences being sent: drawn straight away, so a shape doesn't vanish while Traccar saves it
+    function _showPending(items, color, extra) {
+        var names = {}
+        items.forEach(function(it) { names[it.name.trim().toLowerCase()] = true })
+        var out = plugin.geofences.filter(function(g) { return !(g.mine && names[g.name.trim().toLowerCase()]) })
+        items.forEach(function(it, k) {
+            var attrs = {}
+            var more = (extra && extra.attributes) || {}
+            for (var a in more) attrs[a] = more[a]
+            attrs[geofenceMark] = true
+            attrs.color = color
+            out.push(_gfEntry({ id: -(k + 1), name: it.name, area: it.area, attributes: attrs,
+                                description: it.description || (extra && extra.description) || "" }, true))
+        })
+        out.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) })
+        plugin.geofences = out
     }
 
     // Send-form values → the geofence fields besides name and area (as the QGIS plugin)
@@ -1168,7 +1189,7 @@ Item {
     // ── Changes in Traccar ────────────────────────────────────────────────
     function setGeofenceColor(id, color) {
         var g = _geofence(id)
-        if (!g) return
+        if (!g || g.pending) return            // not in Traccar yet
         var body  = JSON.parse(JSON.stringify(g.raw))
         body.attributes = body.attributes || {}
         body.attributes.color = color
@@ -1181,7 +1202,7 @@ Item {
     // The send form, filled in with the geofence's values (Save puts the changes in Traccar)
     function editGeofence(id) {
         var g = _geofence(id)
-        if (!g) return
+        if (!g || g.pending) return            // not in Traccar yet
         mainDialog.close()
         sendDialog.mode   = g.kind === "polygon" ? "area" : g.kind === "line" ? "line" : g.kind === "circle" ? "circle" : "area"
         sendDialog.coords = g.kind === "circle" ? [g.centre] : g.coords
@@ -1209,7 +1230,7 @@ Item {
 
     function deleteGeofence(id) {
         var g = _geofence(id)
-        if (!g) return
+        if (!g || g.pending) return            // not in Traccar yet
         _send("DELETE", "/api/geofences/" + g.id, null, function() {
             plugin.geofences = plugin.geofences.filter(function(x) { return x.id !== g.id })
             mainWindow.displayToast("Deleted '" + g.name + "' from Traccar")
@@ -1235,6 +1256,7 @@ Item {
     // under the same name is replaced; anything else is added. done(added, replaced, errors) is optional.
     function upsertGeofences(items, color, extra, done) {
         if (items.length === 0) return
+        _showPending(items, color, extra)
         _get("/api/geofences", function(existing) {
             var mine = {}
             existing.forEach(function(g) {
@@ -1996,7 +2018,7 @@ Item {
                                     width: 18; height: 18; radius: 4
                                     color: g.color
                                     opacity: shown ? 1 : 0.4
-                                    MouseArea { anchors.fill: parent; anchors.margins: -8; onClicked: colorMenu.openFor(g) }
+                                    MouseArea { anchors.fill: parent; anchors.margins: -8; enabled: !g.pending; onClicked: colorMenu.openFor(g) }
                                 }
                                 ColumnLayout {
                                     id: gfCol
@@ -2034,10 +2056,12 @@ Item {
                                 }
                                 RowButton {
                                     icon.source: "icons/edit.svg"
+                                    enabled: !g.pending            // not in Traccar yet
                                     onClicked: plugin.editGeofence(g.id)
                                 }
                                 RowButton {
                                     icon.source: "icons/delete.svg"
+                                    enabled: !g.pending
                                     onClicked: plugin.confirm("Delete the geofence '" + g.name + "' from Traccar?\n\n"
                                                               + (g.mine ? "" : "It was made in Traccar, not sent from QGIS or "
                                                                                + "QField — Traccar alerts may use it.\n\n")
@@ -2206,7 +2230,7 @@ Item {
         cfg.geofenceDetailsHidden
         var out = []
         if (detailShown("geofence", "type")) out.push(geofenceType(g))
-        if (detailShown("geofence", "from")) out.push("from " + (g.mine ? "QGIS / QField" : "Traccar"))
+        if (detailShown("geofence", "from")) out.push(g.pending ? "sending…" : "from " + (g.mine ? "QGIS / QField" : "Traccar"))
         if (detailShown("geofence", "speed") && g.speedKmh) out.push("limit " + g.speedKmh + " km/h")
         return out.join("  ·  ")
     }

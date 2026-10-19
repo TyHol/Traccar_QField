@@ -196,6 +196,7 @@ ApplicationWindow {
     }
     function sendDlg() { return opened().filter(function(o) { return o.nameText !== undefined })[0] }
     function gf(name) { return plugin.geofences.filter(function(g) { return g.name === name })[0] }
+    function saved(name) { var g = gf(name); return g !== undefined && !g.pending }   // Traccar's copy
     function wktGeom(wkt) { return { wkt: wkt, asWkt: function(p) { return wkt } } }
     function opened() {
         var out = []
@@ -622,7 +623,11 @@ ApplicationWindow {
             check("Done opens the name dialog for the area", d && d.mode === "area" && d.coords.length === 3)
             d.nameText = "Sector A"
             d.send()
-            waitFor("area sent", function() { return gf("Sector A") !== undefined })
+            check("sent area shown at once (before Traccar replies), marked sending…",
+                  gf("Sector A") && gf("Sector A").pending && gf("Sector A").coords.length === 4
+                  && plugin.geofenceModel.some(function(g) { return g.name === "Sector A" })
+                  && plugin.geofenceLine(gf("Sector A")).indexOf("sending…") >= 0, gf("Sector A") ? plugin.geofenceLine(gf("Sector A")) : "none")
+            waitFor("area sent", function() { return saved("Sector A") })
         },
         function() {
             var s = gf("Sector A")
@@ -645,7 +650,7 @@ ApplicationWindow {
             check("circle at 'My location' (GPS)", d && d.mode === "circle" && d.coords[0].lat === 53.361)
             d.nameText = "Base"
             d.send()
-            waitFor("circle sent", function() { return gf("Base") !== undefined })
+            waitFor("circle sent", function() { return saved("Base") })
         },
         function() {
             // ── on a phone: Add here at the crosshair; a finger tap without QField's point handler ──
@@ -768,7 +773,7 @@ ApplicationWindow {
             addF(L.sec, 2, { sector: "S2" }, "Polygon ((-628000 5336000, -627000 5336000, -627000 5337000, -628000 5336000))")
             addF(L.sec, 3, { sector: null }, "Polygon EMPTY")
             plugin.sendLayer("sectors", -1, "sector", "", 500, "#00838F", false)
-            waitFor("layer sent", function() { return gf("S1") !== undefined && gf("S2") !== undefined })
+            waitFor("layer sent", function() { return saved("S1") && saved("S2") })
         },
         function() {
             var s1 = gf("S1")
@@ -782,7 +787,7 @@ ApplicationWindow {
             L.pois._committed.push({ id: 2, geometry: wktGeom("Point (-6.30 53.35)"),
                                      attribute: function(n) { return n === "name" ? "Car park" : null } })
             plugin.sendLayer("pois", 2, "name", "", 150, "#00838F", false)
-            waitFor("one point as a circle", function() { return gf("Car park") !== undefined })
+            waitFor("one point as a circle", function() { return saved("Car park") })
         },
         function() {
             check("one chosen point → circle of the chosen radius", gf("Car park").radius === 150 && gf("Hut") === undefined)
@@ -810,7 +815,7 @@ ApplicationWindow {
             d.nameText = "Track 3"; d.descriptionText = "Main track"
             d.corridorValue = 40; d.speedValue = 20; d.calendarIndex = 1
             d.send()
-            waitFor("line sent", function() { return gf("Track 3") !== undefined })
+            waitFor("line sent", function() { return saved("Track 3") })
         },
         function() { fetchState() },
         function() {
@@ -880,7 +885,7 @@ ApplicationWindow {
                   && d.calendarIndex === 1, d ? [d.nameText, d.descriptionText, d.speedValue, d.corridorValue].join() : "none")
             d.nameText = "Track 4"; d.speedValue = 0; d.descriptionText = "Lower track"
             d.send()
-            waitFor("edit saved", function() { return gf("Track 4") !== undefined })
+            waitFor("edit saved", function() { return saved("Track 4") })
         },
         function() { fetchState() },
         function() {
