@@ -496,6 +496,8 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
     Component.onCompleted: {
         iface.addItemToPluginsToolbar(pluginButton)
+        // Long-press on the map (right-click on a computer) opens QField's map menu: add "Send to Traccar"
+        try { iface.addItemToCanvasActionsToolbar(canvasSendButton) } catch(e) {}
 
         // Migrate v0.2 layers A/B/C → points / tracks layers (once)
         if (!cfg.v3Migrated) {
@@ -538,6 +540,71 @@ Item {
         iconSource: "traccar_icon.svg"
         visible:    cfg.showButton
         onClicked:  mainDialog.open()
+    }
+
+    // ── Button in QField's long-press / right-click map menu ──────────────
+    QfToolButton {
+        id:         canvasSendButton
+        bgcolor:    Theme.mainColor
+        round:      true
+        iconSource: "traccar_icon.svg"
+        onClicked:  plugin.canvasSend()
+    }
+
+    // The long-pressed spot (QField's map menu) → choose what to send there
+    function canvasSend() {
+        var cm = iface.findItemByObjectName("canvasMenu")
+        var pt = cm ? cm.point : null
+        if (!pt) return
+        try { cm.close() } catch(e) {}
+        if (!plugin.isConnected()) { openSettings("connection"); return }
+        var ll = GeometryUtils.reprojectPoint(GeometryUtils.point(pt.x, pt.y),
+                                              plugin.mapCanvas.mapSettings.destinationCrs, plugin.wgs84)
+        canvasSendMenu.ll = { lon: ll.x, lat: ll.y }
+        canvasSendMenu.open()
+    }
+
+    function canvasSendChoose(what) {
+        var ll = canvasSendMenu.ll
+        canvasSendMenu.close()
+        if (what === "point" || what === "circle") {
+            plugin.cancelDraw()
+            sendDialog.editG  = null
+            sendDialog.mode   = what
+            sendDialog.coords = [ll]
+            sendDialog.open()
+        } else {
+            startDraw(what)                     // an area / line starting at this corner
+            addDrawPoint(ll)
+        }
+    }
+
+    Popup {
+        id: canvasSendMenu
+        parent: mainWindow.contentItem
+        modal:  true
+        padding: 10
+        width:  Math.min(mainWindow.width * 0.9, 340)
+        x: (mainWindow.width - width) / 2
+        y: (mainWindow.height - height) / 2
+        background: DialogBackground {}
+        property var ll: ({ lon: 0, lat: 0 })
+        ColumnLayout {
+            width: parent.width
+            spacing: 2
+            Label { text: "Send to Traccar"; font.bold: true; font.pixelSize: 16 }
+            Hint { text: plugin._locationText({ latitude: canvasSendMenu.ll.lat, longitude: canvasSendMenu.ll.lon }) }
+            Repeater {
+                model: [{ k: "point",  t: "Point here (a device)" }, { k: "circle", t: "Circle here (a geofence)" },
+                        { k: "area",   t: "Start an area here" },    { k: "line",   t: "Start a line here" }]
+                delegate: Button {
+                    Layout.fillWidth: true
+                    flat: true
+                    text: modelData.t
+                    onClicked: plugin.canvasSendChoose(modelData.k)
+                }
+            }
+        }
     }
 
     // ── Plugin manager settings (QField shows a ⚙ icon when this exists) ──
@@ -2773,6 +2840,8 @@ Item {
                           "device in Traccar — a new name adds one, an existing device's name moves it there; for a " +
                           "new one you can set its identifier, category (icon), group, phone, model and contact. " +
                           "Points added this way can be deleted from the device list.\n" +
+                          "Or long-press the map (right-click on a computer) and tap the Traccar Live button in " +
+                          "QField's map menu: point, circle, area or line at that spot.\n" +
                           "Add → Area / Line: tap each corner, then Done. Geofences get a name, description, speed " +
                           "limit (Traccar warns when a device goes faster inside), corridor width for a line, a " +
                           "Traccar calendar (active only at those times) and a colour.\n" +

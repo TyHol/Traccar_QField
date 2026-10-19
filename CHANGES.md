@@ -15,6 +15,9 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   While adding, the plugin now catches map taps itself (one tap passed on by QField too counts once), and
   shows a **crosshair** at the map centre with an **Add here** / **Add corner** button: move the map to put
   the cross on the spot and tap it — works on every QField version.
+- **Long-press the map → Send to Traccar.** QField's map menu (long-press on a phone, right-click on a
+  computer) gets a Traccar Live button: *Point here*, *Circle here*, *Start an area here* or *Start a line
+  here* at the pressed spot. Same as the QGIS plugin's right-click menu. Works from QField 3.3.
 - New icons `icons/clear.svg`, `icons/more.svg` (Material Icons).
 - Tests: the main window (both tabs), the send forms, *From layer* and every Settings page are checked at
   phone width (360) with phone-sized text — nothing may stick out or be squeezed; a real finger

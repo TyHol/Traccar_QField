@@ -21,6 +21,14 @@ ApplicationWindow {
     property alias projectObj: projectStub
 
     Row { id: toolbarRow }
+    Row { id: canvasActionsRow }                        // QField's long-press map menu toolbar
+
+    QtObject {                                          // QField's long-press map menu
+        id: canvasMenuStub
+        property var  point: null                       // the long-pressed spot, map CRS
+        property bool closed: false
+        function close() { closed = true }
+    }
 
     Item {
         id: canvas
@@ -61,9 +69,11 @@ ApplicationWindow {
             if (n === "pointHandler") return pointHandler
             if (n === "cloudConnection") return cloud
             if (n === "positionSource") return positionSource
+            if (n === "canvasMenu") return canvasMenuStub
             return null
         }
         function addItemToPluginsToolbar(item) { item.parent = toolbarRow }
+        function addItemToCanvasActionsToolbar(item) { item.parent = canvasActionsRow }
     }
 
     QtObject {
@@ -665,6 +675,29 @@ ApplicationWindow {
                   && Math.abs(c.lat - (53.38 - 300 / 20000)) < 1e-6, JSON.stringify(plugin.drawPts))
             plugin.cancelDraw()
             sleep(100)
+        },
+        function() {
+            // ── long-press (right-click) on the map → QField's map menu → Send to Traccar ──
+            check("button added to QField's long-press map menu", canvasActionsRow.children.length === 1)
+            canvasMenuStub.point = { x: -6.302, y: 53.361 }
+            canvasActionsRow.children[0].clicked()
+            check("map menu closed, Send to Traccar choices for that spot", canvasMenuStub.closed
+                  && opened().some(function(o) { return o.ll !== undefined && Math.abs(o.ll.lon + 6.302) < 1e-9 }))
+            plugin.canvasSendChoose("circle")
+            sleep(300)
+        },
+        function() {
+            var d = sendDlg()
+            check("Circle here: the send form for a circle at the long-pressed spot",
+                  d && d.mode === "circle" && Math.abs(d.coords[0].lat - 53.361) < 1e-9 && !d.editG)
+            d.close()
+            canvasMenuStub.point = { x: -6.31, y: 53.37 }
+            canvasActionsRow.children[0].clicked()
+            plugin.canvasSendChoose("area")
+            check("Start an area here: drawing with that spot as the first corner",
+                  plugin.drawMode === "area" && plugin.drawPts.length === 1 && plugin.drawPts[0].lat === 53.37)
+            plugin.cancelDraw()
+            sleep(300)
         },
         function() {
             check("circle geofence with the remembered radius", gf("Base").radius === cfg.circleRadius
