@@ -1005,7 +1005,7 @@ Item {
                 out.push({ id: g.id, name: g.name || "", area: g.area || "", mine: attrs[geofenceMark] === true,
                            raw: g, color: _normColor(attrs.color) || defaultGfColor,
                            kind: parsed.kind, coords: c, radius: parsed.radius,
-                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0,
+                           labelLon: lp ? lp.lon : 0, labelLat: lp ? lp.lat : 0, centre: parsed.centre || null,
                            description: g.description || "",
                            speedKmh: attrs.speedLimit ? Math.round(attrs.speedLimit * 1.852) : 0 })
             })
@@ -1080,6 +1080,35 @@ Item {
         body.attributes.color = color
         _send("PUT", "/api/geofences/" + g.id, body, function() {
             mainWindow.displayToast("Colour of '" + g.name + "' saved in Traccar")
+            loadGeofences()
+        }, function(msg) { mainWindow.displayToast("Couldn't change '" + g.name + "': " + msg) })
+    }
+
+    // The send form, filled in with the geofence's values (Save puts the changes in Traccar)
+    function editGeofence(id) {
+        var g = _geofence(id)
+        if (!g) return
+        mainDialog.close()
+        sendDialog.mode   = g.kind === "polygon" ? "area" : g.kind === "line" ? "line" : g.kind === "circle" ? "circle" : "area"
+        sendDialog.coords = g.kind === "circle" ? [g.centre] : g.coords
+        sendDialog.editG  = g
+        sendDialog.open()
+    }
+
+    // name, extra = geofenceExtra(form values); radius > 0: a circle's new radius. The shape stays.
+    function updateGeofence(g, name, extra, radius) {
+        var body  = JSON.parse(JSON.stringify(g.raw))
+        var attrs = body.attributes || {}
+        delete attrs.speedLimit
+        delete attrs.polylineDistance
+        for (var k in extra.attributes) attrs[k] = extra.attributes[k]
+        body.attributes  = attrs
+        body.name        = name
+        body.description = extra.description
+        body.calendarId  = extra.calendarId
+        if (g.kind === "circle" && radius > 0) body.area = areaText("circle", [g.centre], radius).area
+        _send("PUT", "/api/geofences/" + g.id, body, function() {
+            mainWindow.displayToast("'" + name + "' saved in Traccar")
             loadGeofences()
         }, function(msg) { mainWindow.displayToast("Couldn't change '" + g.name + "': " + msg) })
     }
@@ -1654,17 +1683,33 @@ Item {
                     enabled: plugin.win !== null
                     onClicked: { cfg.liveOn = false; clearWindow(); plugin.geofences = []; plugin.statusMsg = "" }
                 }
+                Button {                            // same Add menu as the QGIS plugin
+                    id: addButton
+                    text: "Add"
+                    icon.source: "icons/add.svg"
+                    onClicked: addMenu.open()
+                    Menu {
+                        id: addMenu
+                        y: addButton.height
+                        MenuItem { text: "Point";  onTriggered: plugin.startDraw("point") }
+                        MenuItem { text: "Area";   onTriggered: plugin.startDraw("area") }
+                        MenuItem { text: "Line";   onTriggered: plugin.startDraw("line") }
+                        MenuItem { text: "Circle"; onTriggered: plugin.startDraw("circle") }
+                        MenuSeparator {}
+                        MenuItem { text: "From layer…"; onTriggered: { mainDialog.close(); layerSendDialog.open() } }
+                    }
+                }
             }
 
             // ── What to show ──────────────────────────────────────────────
-            Flow {
+            RowLayout {                             // one row; Accuracy circles: Settings → Advanced
                 Layout.fillWidth: true
                 spacing: 0
-                ShowBox { text: "Markers";  checked: cfg.showMarkers;  onToggled: cfg.showMarkers  = checked }
-                ShowBox { text: "Labels";   checked: cfg.showLabels;   onToggled: cfg.showLabels   = checked }
-                ShowBox { text: "Tracks";   checked: cfg.showTrails;   onToggled: cfg.showTrails   = checked }
-                ShowBox { text: "Accuracy"; checked: cfg.showAccuracy; onToggled: cfg.showAccuracy = checked }
+                ShowBox { text: "Markers";   checked: cfg.showMarkers;   onToggled: cfg.showMarkers   = checked }
+                ShowBox { text: "Labels";    checked: cfg.showLabels;    onToggled: cfg.showLabels    = checked }
+                ShowBox { text: "Tracks";    checked: cfg.showTrails;    onToggled: cfg.showTrails    = checked }
                 ShowBox { text: "Geofences"; checked: cfg.showGeofences; onToggled: cfg.showGeofences = checked }
+                Item { Layout.fillWidth: true }
             }
 
             // ── Devices | Geofences tabs ──────────────────────────────────
@@ -1814,7 +1859,7 @@ Item {
                     }
                     Hint {
                         visible: plugin.geofences.length === 0
-                        text: "No geofences in Traccar yet — add one with Area, Line or Circle below."
+                        text: "No geofences in Traccar yet — add one with Add → Area, Line or Circle."
                     }
                     ListView {
                         id: geofenceList
@@ -1880,6 +1925,10 @@ Item {
                                     onClicked: { plugin.zoomToGeofence(g.id); mainDialog.close() }
                                 }
                                 RowButton {
+                                    icon.source: "icons/edit.svg"
+                                    onClicked: plugin.editGeofence(g.id)
+                                }
+                                RowButton {
                                     icon.source: "icons/delete.svg"
                                     onClicked: plugin.confirm("Delete the geofence '" + g.name + "' from Traccar?\n\n"
                                                               + (g.mine ? "" : "It was made in Traccar, not sent from QGIS or "
@@ -1890,22 +1939,6 @@ Item {
                             }
                         }
                     }
-                }
-            }
-
-            // ── Add to Traccar ────────────────────────────────────────────
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 4
-                Label { text: "Add:"; font.bold: true }
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 4
-                    Button { text: "Point";  flat: true; onClicked: plugin.startDraw("point") }
-                    Button { text: "Area";   flat: true; onClicked: plugin.startDraw("area") }
-                    Button { text: "Line";   flat: true; onClicked: plugin.startDraw("line") }
-                    Button { text: "Circle"; flat: true; onClicked: plugin.startDraw("circle") }
-                    Button { text: "From layer…"; flat: true; onClicked: { mainDialog.close(); layerSendDialog.open() } }
                 }
             }
 
@@ -2223,6 +2256,8 @@ Item {
         property string mode: "point"     // point, circle, area, line
         property var    coords: []
         property bool   sent: false
+        property var    editG: null       // a geofence being edited (from plugin.geofences), else null
+        property string keepColor: ""     // colour for new geofences, put back after an edit
         property alias  nameText:        sendName.text
         property alias  descriptionText: sendDescription.text
         property alias  speedValue:      sendSpeed.value
@@ -2240,7 +2275,8 @@ Item {
             RowLayout {
                 anchors { fill: parent; leftMargin: 12; rightMargin: 4 }
                 Label {
-                    text: sendDialog.point ? "Send point" : "Send "
+                    text: sendDialog.editG ? "Edit geofence"
+                          : sendDialog.point ? "Send point" : "Send "
                           + ({ circle: "circle", area: "area", line: "line" })[sendDialog.mode] + " as a geofence"
                     color: "white"; font.pixelSize: 17; font.bold: true
                     Layout.fillWidth: true
@@ -2249,22 +2285,52 @@ Item {
             }
         }
 
-        onOpened: {
+        onOpened: sendName.forceActiveFocus()
+        // Filled in as it opens (onOpened waits for the opening animation)
+        onAboutToShow: {
             sent = false
             sendName.text = point ? cfg.lastSendName : ""
             sendRadius.value = cfg.circleRadius
             sendDescription.text = ""; sendSpeed.value = 0; sendCorridor.value = 0; sendCalendar.currentIndex = 0
             sendUid.text = ""; sendCategory.currentIndex = 0; sendGroup.currentIndex = 0
             sendPhone.text = ""; sendModel.text = ""; sendContact.text = ""
+            if (editG) fillEdit(editG)
             sendScroll.ScrollBar.vertical.position = 0
-            sendName.forceActiveFocus()
         }
         // Closed without sending (Cancel / ✕): back to drawing — tap again, or the corners kept
-        onClosed: if (!sent && (mode === "point" || mode === "circle")) plugin.drawPts = []
+        onClosed: {
+            if (!editG && !sent && (mode === "point" || mode === "circle")) plugin.drawPts = []
+            if (editG) { editG = null; cfg.geofenceColor = keepColor; mainDialog.open() }
+        }
+
+        // Edit: the geofence's current values into the form
+        function fillEdit(g) {
+            var raw = g.raw || {}, attrs = raw.attributes || {}
+            sendName.text = g.name
+            sendDescription.text = raw.description || ""
+            sendSpeed.value = attrs.speedLimit ? Math.round(attrs.speedLimit * 1.852) : 0
+            sendCorridor.value = attrs.polylineDistance ? Math.round(attrs.polylineDistance) : 0
+            sendCalendar.currentIndex = 0
+            for (var i = 0; i < plugin.calendars.length; i++)
+                if (plugin.calendars[i].id === raw.calendarId) sendCalendar.currentIndex = i + 1
+            if (g.kind === "circle") sendRadius.value = Math.round(g.radius)
+            keepColor = cfg.geofenceColor
+            cfg.geofenceColor = g.color
+        }
 
         function send() {
             var name = sendName.text.trim()
             if (name === "") { mainWindow.displayToast("Give it a name first"); return }
+            var extra = point ? null : plugin.geofenceExtra({
+                color: cfg.geofenceColor, description: sendDescription.text.trim(), speedKmh: sendSpeed.value,
+                corridorM: mode === "line" ? sendCorridor.value : 0,
+                calendarId: sendCalendar.currentIndex > 0 ? plugin.calendars[sendCalendar.currentIndex - 1].id : 0 })
+            if (editG) {
+                plugin.updateGeofence(editG, name, extra, mode === "circle" ? sendRadius.value : 0)
+                sent = true
+                close()
+                return
+            }
             if (point) {
                 cfg.lastSendName = name
                 plugin.sendPoint(name, coords[0].lon, coords[0].lat, null, {
@@ -2275,10 +2341,7 @@ Item {
                 cfg.circleRadius = sendRadius.value
                 var a = plugin.areaText(mode === "area" ? "polygon" : mode, coords, sendRadius.value)
                 if (!a) { mainWindow.displayToast("Not enough corners"); return }
-                plugin.upsertGeofences([{ name: name, area: a.area }], cfg.geofenceColor, plugin.geofenceExtra({
-                    color: cfg.geofenceColor, description: sendDescription.text.trim(), speedKmh: sendSpeed.value,
-                    corridorM: mode === "line" ? sendCorridor.value : 0,
-                    calendarId: sendCalendar.currentIndex > 0 ? plugin.calendars[sendCalendar.currentIndex - 1].id : 0 }))
+                plugin.upsertGeofences([{ name: name, area: a.area }], cfg.geofenceColor, extra)
             }
             sent = true
             plugin.cancelDraw()
@@ -2316,7 +2379,7 @@ Item {
                           + "The details below are for a new point."
                 }
                 Hint {
-                    visible: !sendDialog.point
+                    visible: !sendDialog.point && !sendDialog.editG
                     text: "A geofence sent from QGIS or QField before with the same name is replaced."
                 }
 
@@ -2410,7 +2473,7 @@ Item {
                     Layout.topMargin: 6
                     Item { Layout.fillWidth: true }
                     Button { text: "Cancel"; flat: true; onClicked: sendDialog.close() }
-                    Button { text: "Send to Traccar"; onClicked: sendDialog.send() }
+                    Button { text: sendDialog.editG ? "Save to Traccar" : "Send to Traccar"; onClicked: sendDialog.send() }
                 }
             }
         }
@@ -2647,7 +2710,8 @@ Item {
                     text: "Each device has its own colour (the same as in the QGIS plugin Traccar Live); its " +
                           "marker and track turn grey when the last fix is older than the limit in Settings → Advanced. " +
                           "Tap a marker for name, fix age, speed and battery. " +
-                          "Markers, Labels, Tracks and Accuracy circles can each be switched on or off.\n" +
+                          "Markers, Labels, Tracks and Geofences can each be switched on or off (GPS accuracy circles: " +
+                          "Settings → Advanced).\n" +
                           "In the device list, untick a device to hide it from the map and leave it out of the " +
                           "Save buttons (remembered); the tick next to 'Devices' shows or hides them all. " +
                           "The target button centres the map on a device and the copy button copies its location — " +
@@ -2660,9 +2724,10 @@ Item {
                     text: "Traccar's geofences (areas, lines, circles) are drawn on the map in their own colour, " +
                           "with their names — they never go grey. Tick Geofences under Show to switch them all on " +
                           "or off; in the Geofences tab, untick one to hide it, tap its colour to change it " +
-                          "(saved in Traccar), the target to centre the map on it, or the bin to delete it from " +
+                          "(saved in Traccar), the pencil to edit its name, description, speed limit, corridor, " +
+                          "calendar or radius, the target to centre the map on it, or the bin to delete it from " +
                           "Traccar (you're asked first). ⋮ on either tab chooses which details its list shows.\n" +
-                          "Add → Point / Circle: tap the map (or 'My location'), give a name. A point becomes a " +
+                          "Add (next to Clear) → Point / Circle: tap the map (or 'My location'), give a name. A point becomes a " +
                           "device in Traccar — a new name adds one, an existing device's name moves it there; for a " +
                           "new one you can set its identifier, category (icon), group, phone, model and contact. " +
                           "Points added this way can be deleted from the device list.\n" +
@@ -3092,6 +3157,16 @@ Item {
                         Layout.fillWidth: true
                     }
                     Hint { text: "When hidden, open Traccar Live from QField's Plugins list: tap the settings icon next to Traccar Live." }
+
+                    Item { height: 8 }
+                    Label { text: "On the map"; font.bold: true; font.pixelSize: 15 }
+                    Switch {
+                        text:    "GPS accuracy circles"
+                        checked: cfg.showAccuracy
+                        onToggled: cfg.showAccuracy = checked
+                        Layout.fillWidth: true
+                    }
+                    Hint { text: "A circle round each marker as wide as the fix's reported accuracy." }
 
                     Item { height: 8 }
                     Label { text: "Location"; font.bold: true; font.pixelSize: 15 }

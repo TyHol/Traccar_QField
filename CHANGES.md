@@ -12,6 +12,13 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   colour swatches. New points (devices): identifier, category (map icon), group, phone, model, contact.
   Groups and calendars are read from Traccar; the form scrolls on small screens.
 - **From layer** can take each geofence's description from a field.
+- **Edit a geofence**: the pencil on its row opens the same form, filled in — name, description, speed
+  limit, corridor width, calendar, colour, a circle's radius — and *Save to Traccar* updates it.
+- **Add** button next to Clear (Point, Area, Line, Circle, From layer…) replaces the Add row at the
+  bottom. New icons `icons/add.svg`, `icons/edit.svg`.
+- **One row of Show boxes**: Markers, Labels, Tracks, Geofences. GPS accuracy circles moved to
+  Settings → Advanced.
+- The send form is filled in as it starts to open, so it never shows the previous send's values.
 - **Devices and Geofences in tabs** (with counts). **⋮** on each tab chooses which detail lines its
   list shows — devices: fixes and time span, speed, battery, location; geofences: type, made in,
   speed limit, description (remembered: `deviceDetailsHidden`, `geofenceDetailsHidden`).

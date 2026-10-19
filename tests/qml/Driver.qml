@@ -696,6 +696,40 @@ ApplicationWindow {
         },
         function() {
             check("From layer: description from a field", gf("S2").description === "S2")
+            // ── edit a geofence with the same form ──
+            L.keep = cfg.geofenceColor
+            plugin.editGeofence(gf("Track 3").id)
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("Edit opens the form filled in", d && d.editG && d.mode === "line" && d.nameText === "Track 3"
+                  && d.descriptionText === "Main track" && d.speedValue === 20 && d.corridorValue === 40
+                  && d.calendarIndex === 1, d ? [d.nameText, d.descriptionText, d.speedValue, d.corridorValue].join() : "none")
+            d.nameText = "Track 4"; d.speedValue = 0; d.descriptionText = "Lower track"
+            d.send()
+            waitFor("edit saved", function() { return gf("Track 4") !== undefined })
+        },
+        function() { fetchState() },
+        function() {
+            var t = serverState.geofences.filter(function(g) { return g.name === "Track 4" })[0]
+            check("Edit saves name and description, clears the speed limit, keeps corridor, calendar and shape",
+                  t && t.description === "Lower track" && t.attributes.speedLimit === undefined
+                  && t.attributes.polylineDistance === 40 && t.calendarId === 9 && t.area.indexOf("LINESTRING") === 0
+                  && plugin.geofences.length === serverState.geofences.length, JSON.stringify(t))
+            check("colour for new geofences unchanged after an edit", cfg.geofenceColor === L.keep, cfg.geofenceColor)
+            opened().forEach(function(o) { o.close() })
+            plugin.editGeofence(gf("Base").id)
+            sleep(200)
+        },
+        function() {
+            var d = sendDlg()
+            check("editing a circle shows its radius", d && d.mode === "circle")
+            d.send()            // radius from the form (cfg default); name kept
+            waitFor("circle saved", function() { return toasts[toasts.length - 1].indexOf("'Base' saved") === 0 })
+        },
+        function() {
+            opened().forEach(function(o) { o.close() })
             sleep(200)
         },
         function() {
