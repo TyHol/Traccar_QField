@@ -78,6 +78,7 @@ GEOFENCES = [   # one made in Traccar (own colour), one sent from QGIS before
      "area": "LINESTRING (53.35 -6.30, 53.355 -6.29)", "attributes": {"createdByTraccarLiveQgis": True}},
 ]
 OSMAND = []     # fixes received on the OsmAnd port
+CALLS = {"route": 0, "per_device": 0}           # how the plugin asked for a window's fixes
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -153,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             POS[d["id"]].append(_fix(d["id"], t, float(q["lon"][0]), float(q["lat"][0]), len(POS[d["id"]])))
             return self._send(200)
         if u.path == "/test/state":                     # test hook: what the server holds now
-            return self._send(200, {"geofences": GEOFENCES, "devices": DEVICES, "osmand": len(OSMAND)})
+            return self._send(200, {"geofences": GEOFENCES, "devices": DEVICES, "osmand": len(OSMAND), "calls": CALLS})
         if u.path == "/test/addfix":                    # test hook: a new live fix
             d = int(q["dev"][0])
             n = len(POS[d])
@@ -171,7 +172,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, [{"id": 9, "name": "Operation hours"}])
         if u.path == "/api/devices":
             return self._send(200, DEVICES)
+        if u.path == "/api/reports/route":             # every requested device's fixes in one reply
+            CALLS["route"] += 1
+            frm, to = _p(q["from"][0]), _p(q["to"][0])
+            return self._send(200, [p for d in q.get("deviceId", []) for p in POS.get(int(d), [])
+                                    if frm <= _p(p["fixTime"]) <= to])
         if u.path == "/api/positions" and "deviceId" in q:
+            CALLS["per_device"] += 1
             d = int(q["deviceId"][0])
             frm, to = _p(q["from"][0]), _p(q["to"][0])
             return self._send(200, [p for p in POS.get(d, []) if frm <= _p(p["fixTime"]) <= to])

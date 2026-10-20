@@ -35,7 +35,7 @@ Requires a Traccar account (your own server or e.g. `https://server.traccar.org`
 
 1. Tap the **Traccar** button on the QField toolbar.
 2. **Settings (cog) → Connection** — enter the server address (the one you open in a browser), your Traccar email / username and password, and tap *Test connection*.
-3. Pick a **Time window** and tap **Live** to follow devices, or **Refresh** to load the window once.
+3. Pick a **Time window**. **Live** is on by default and follows devices; tap **Stop live** and use **Refresh** to load the window once.
 4. To keep what you see, choose layers in **Settings (cog) → Layers** and use **Save positions** / **Save tracks**.
 
 To hide the Traccar button from the map, turn off **Show button on the map** in **Settings (cog) → Advanced**, or tap the settings icon next to *Traccar Live* in QField's **Plugins** list and turn off **Show icon on canvas**. Live tracking keeps running. With the button hidden, open the plugin from that Plugins-list screen: it has an **Open Traccar Live** button.
@@ -49,13 +49,13 @@ Not sure which layers to use? Add the two layers from [`traccar_template.gpkg`](
 |---|---|
 | Last 15 min … Last 3 months | Follows the current time. With Live on, new fixes are added and old ones drop off. |
 | Custom dates… | From / To in local time (`YYYY-MM-DD HH:MM`), then *Show this window*. |
-| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in Settings (cog) → Advanced. |
+| From feature… | The start/end of a feature, e.g. an incident: start → end, start + duration, or end − duration. Set the layer up once in Settings (cog) → Incident. |
 
 Each device in the list shows how many fixes it has in the window and their time span. A window that ends in the past cannot change, so Live pauses for it and the markers show each device's last fix in that window.
 
 ### Main screen
 - **Live / Stop live** — refresh every few seconds (10 s by default).
-- **Refresh** — load the window once. **Clear** — stop Live and remove everything from the map.
+- **Refresh** (shown while Live is off) — load the window once. **Clear map** — stop Live and remove everything from the map.
 - **Show** — switch Markers, Labels, Tracks and Geofences on or off (GPS accuracy circles: Settings → Advanced).
 - **Add** (next to Clear) — Point, Area, Line, Circle or From layer…, described below.
 - **Devices** — each row shows the latest position (lat/long, degrees + minutes, Irish Grid, UK Grid or the project CRS — Settings (cog) → Advanced); the copy button copies it to the clipboard and the target button centres the map on that device. Untick a device to hide it from the map and leave it out of the Save buttons (remembered); the tick by *Devices* shows or hides them all. Each device has its own colour (the same as in the QGIS plugin); markers and tracks turn grey when the last fix is older than the limit (10 min by default). Tap a marker on the map for its name, fix age, speed and battery.
@@ -92,7 +92,7 @@ Fields are filled **by name** — whichever of these your layer has; others are 
 | `battery`, `motion`, `address` | from the device | `saved_at` | when you saved |
 | `fetched_at` | when you saved | | |
 
-Two extras in **Settings (cog) → Layers / Tag**:
+Two extras in **Settings (cog) → Layers / Incident**:
 - **Device name goes into** — also write the device name into another text field, e.g. `title` on QField's built-in layers (only text fields are offered).
 - **Tag** — stamp a text such as `FIRE-2026-001` into a field of your choice on everything you save. With *From feature*, the feature's display value can be used as the tag instead.
 
@@ -109,8 +109,8 @@ Settings are a list of short pages; changes apply immediately.
 |---|---|
 | **Connection** | Server URL, email / username, password, *Test connection*, *Send points to* (Traccar's OsmAnd address; blank = port 5055 on the server) |
 | **Layers** | Positions layer, device-name field, latest / every fix · Tracks layer, device-name field, add / keep most recent · Geofences: polygon and line layers · *Save after every refresh* |
-| **Tag** | On/off, tag text, field, use the feature's display value |
-| **Advanced** | Map button, location format (lat/long, degrees + minutes, Irish Grid, UK Grid, project CRS), refresh interval, grey-marker limit, the layer and fields used by *From feature* |
+| **Incident** | The layer and fields used by *From feature* · Tag: on/off, tag text, field, use the feature's display value |
+| **Advanced** | Map button, GPS accuracy circles, location format (lat/long, degrees + minutes, Irish Grid, UK Grid, project CRS), refresh interval, grey-marker limit |
 
 The password is stored in QField's settings on the device, like other plugin settings.
 

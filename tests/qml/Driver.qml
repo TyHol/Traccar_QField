@@ -194,6 +194,8 @@ ApplicationWindow {
         var sp = canvas.mapSettings.coordinateToScreen({ x: lon, y: lat })
         return pointHandler.handlers["traccarlive"](Qt.point(sp.x, sp.y), null, "clicked")
     }
+    // The confirmation dialog (Move it / Delete…) when it's showing, else undefined
+    function confirmDlg() { return opened().filter(function(o) { return o.okText !== undefined })[0] }
     function sendDlg() { return opened().filter(function(o) { return o.nameText !== undefined })[0] }
     function gf(name) { return plugin.geofences.filter(function(g) { return g.name === name })[0] }
     function saved(name) { var g = gf(name); return g !== undefined && !g.pending }   // Traccar's copy
@@ -251,6 +253,8 @@ ApplicationWindow {
         steps = [
         function() {
             check("plugin loads", plugin !== null && cfg !== null)
+            check("Live is on by default (remembered); nothing loads before a login", cfg.liveOn === true && !plugin.loading)
+            cfg.liveOn = false                          // the tests start Live themselves
             check("marker tap handler registered", typeof pointHandler.handlers["traccarlive"] === "function")
             check("toolbar button added", toolbarRow.children.length === 1)
             cfg.serverUrl = serverUrl; cfg.username = "wrong"; cfg.password = "x"
@@ -264,7 +268,10 @@ ApplicationWindow {
             plugin.reloadWindow()
             waitFor("load last 3 h", function() { return !plugin.loading }, 20000)
         },
+        function() { fetchState() },
         function() {
+            check("a window loads with one route report for all devices (not one request per device)",
+                  serverState.calls.route === 1 && serverState.calls.per_device === 0, JSON.stringify(serverState.calls))
             check("Phone A: 240 fixes in last 3 h", devTrack(1).length === 240, devTrack(1).length)
             check("markers for Phone A + Van 3", plugin.overlayModel.length === 2, plugin.overlayModel.length)
             check("one track line drawn", plugin.trackModel.length === 1)
@@ -381,7 +388,7 @@ ApplicationWindow {
         function() {
             check("queued save written once cloud is idle", plugin.writeQueue.length === 0)
             // ── every page of Settings, then every other dialog ──
-            var pages = ["", "connection", "layers", "tag", "advanced"]
+            var pages = ["", "connection", "layers", "incident", "advanced"]
             for (var i = 0; i < pages.length; i++) {
                 plugin.openSettings(pages[i])
                 var o = opened()
@@ -527,7 +534,7 @@ ApplicationWindow {
             var bad = overflowing(L.layerDlg)
             check("phone width: From layer fits", bad.length === 0, bad.join(" | "))
             L.layerDlg.close()
-            L.pages = ["", "connection", "layers", "tag", "advanced"]
+            L.pages = ["", "connection", "layers", "incident", "advanced"]
             L.badPages = []
             sleep(200)
         },
@@ -734,7 +741,28 @@ ApplicationWindow {
                   dev && /^qgis-clue-4-\d+$/.test(dev.uniqueId) && serverState.osmand === 1, JSON.stringify(dev))
             check("name remembered for next time", cfg.lastSendName === "Clue 4")
             L.clueId = dev ? String(dev.id) : ""
+            L.nFix = serverState.osmand
             plugin.sendPoint("Phone A", -6.32, 53.36)
+            waitFor("asked before moving Phone A", function() { return confirmDlg() !== undefined })
+        },
+        function() {
+            var c = confirmDlg()
+            check("moving a device not added from QGIS / QField asks first",
+                  c.okText === "Move it" && c.text.indexOf("Phone A") >= 0 && c.text.indexOf("real tracker") >= 0, c.text)
+            c.onCancel(); c.onCancel = null; c.close()                 // Cancel
+            sleep(300)
+        },
+        function() { fetchState() },
+        function() {
+            check("…Cancel: nothing sent, its stand-in gone", serverState.osmand === L.nFix
+                  && !plugin.pendingPoints.some(function(m) { return m.name === "Phone A" }))
+            plugin.sendPoint("Phone A", -6.32, 53.36)
+            waitFor("asked again", function() { return confirmDlg() !== undefined })
+        },
+        function() {
+            var c = confirmDlg(), a = c.action
+            c.action = null; c.onCancel = null; c.close()
+            a()                                                         // Move it
             sleep(400)
         },
         function() { fetchState() },
@@ -753,10 +781,23 @@ ApplicationWindow {
                   && plugin.overlayModel.some(function(m) { return m.name === "Clue 4" }))
             L.keepSendUrl = cfg.sendUrl
             cfg.sendUrl = serverUrl + "/nope/"         // not an OsmAnd port: the fix is refused
-            plugin.sendPoint("Van 3", -6.307, 53.364)      // an existing device: nothing is added
-            check("refused point: shown while sending…", plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }))
+            plugin.sendPoint("Clue 4", -6.307, 53.364)     // a point added from QField: moves without asking
+            check("refused point: shown while sending…", plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" })
+                  && confirmDlg() === undefined)
             waitFor("refused point's marker gone", function() {
-                return !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }) })
+                return !plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" }) })
+        },
+        function() {
+            plugin.sendPoint("Clue 6", -6.306, 53.363)     // new: a device is added, then its fix refused
+            waitFor("refused new point's marker gone", function() {
+                return !plugin.pendingPoints.some(function(m) { return m.name === "Clue 6" }) })
+        },
+        function() { sleep(300) },
+        function() { fetchState() },
+        function() {
+            check("…the empty device added for a refused point is removed from Traccar",
+                  !serverState.devices.some(function(x) { return x.name === "Clue 6" }),
+                  serverState.devices.map(function(x) { return x.name }).join())
         },
         function() {
             cfg.sendUrl = L.keepSendUrl
@@ -764,14 +805,14 @@ ApplicationWindow {
             var w = JSON.parse(JSON.stringify(plugin.win))
             w.moving = false                             // as a custom-dates window that ends in the past
             plugin.win = w
-            plugin.sendPoint("Van 3", -6.308, 53.365)
+            plugin.sendPoint("Clue 4", -6.308, 53.365)
             waitFor("past window: stand-in goes once accepted", function() {
                 return toasts.some(function(t) { return t.indexOf("not shown here") >= 0 })
-                       && !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }) }, 8000)
+                       && !plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" }) }, 8000)
         },
         function() {
             check("fixed past window: the stand-in goes once Traccar accepts the point",
-                  !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }))
+                  !plugin.pendingPoints.some(function(m) { return m.name === "Clue 4" }))
             plugin.win = L.winSave
             toolbarRow.children[0].clicked()        // draw the lists with geofences and a sent point
             sleep(200)

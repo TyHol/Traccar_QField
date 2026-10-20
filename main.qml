@@ -1,5 +1,5 @@
 /**
- * Traccar Live – QField Plugin  v0.7.2
+ * Traccar Live – QField Plugin
  *
  * One time window drives everything: the tracks drawn on the map are the fixes
  * inside the window, and "Save tracks" / "Save positions" write exactly what is
@@ -56,7 +56,7 @@ Item {
         property int    featureDuration: 120    // minutes
 
         // Live + overlay
-        property bool   liveOn:          false
+        property bool   liveOn:          true   // on by default; remembered
         property int    liveIntervalSec: 10
         property int    staleMinutes:    10     // marker turns grey when last fix is older
         property bool   showMarkers:     true
@@ -100,15 +100,6 @@ Item {
         property string eventStartField:   ""
         property string eventEndField:     ""
 
-        // Kept for migration only — no longer used
-        property bool   v3Migrated:      false
-        property bool   v4Migrated:      false
-        property int    trailMinutes:    30
-        property int    pointsPerDevice: 1
-        property string liveLayerName:   ""
-        property string appendLayerName: ""
-        property string lineLayerName:   ""
-        property string pointLayerName:  ""
     }
 
     // Time window choices. minutes -1 / -2 open inline controls in the main dialog.
@@ -445,7 +436,7 @@ Item {
     function populateEventFeatures() {
         eventFeatureModel.clear()
         if (cfg.eventLayerName === "") {
-            eventFeatureModel.append({ label: "— set up in Settings → Advanced —",
+            eventFeatureModel.append({ label: "— set up in Settings → Incident —",
                                        startIso: "", endIso: "", fid: -1, disp: "" })
             return
         }
@@ -510,23 +501,6 @@ Item {
         // Long-press on the map (right-click on a computer) opens QField's map menu: add "Send to Traccar"
         try { iface.addItemToCanvasActionsToolbar(canvasSendButton) } catch(e) {}
 
-        // Migrate v0.2 layers A/B/C → points / tracks layers (once)
-        if (!cfg.v3Migrated) {
-            if (cfg.pointsLayerName === "")
-                cfg.pointsLayerName = cfg.appendLayerName !== "" ? cfg.appendLayerName
-                                    : cfg.liveLayerName   !== "" ? cfg.liveLayerName
-                                    : cfg.pointLayerName
-            if (cfg.tracksLayerName === "")
-                cfg.tracksLayerName = cfg.lineLayerName
-            cfg.v3Migrated = true
-        }
-        // Migrate v0.3 trail length / points-per-device (once)
-        if (!cfg.v4Migrated) {
-            if (cfg.trailMinutes > 0) cfg.windowMinutes = cfg.trailMinutes
-            cfg.pointsMode = cfg.pointsPerDevice > 1 ? 1 : 0
-            cfg.v4Migrated = true
-        }
-
         // Tap a marker → device info toast
         try {
             if (pointHandler) {
@@ -537,7 +511,7 @@ Item {
             }
         } catch(e) { /* older QField without pointHandler.registerHandler */ }
 
-        if (cfg.liveOn) Qt.callLater(loadWindow)
+        if (cfg.liveOn && plugin.isConnected()) Qt.callLater(loadWindow)
     }
 
     Component.onDestruction: {
@@ -1003,10 +977,6 @@ Item {
         return out
     }
 
-    function isHidden(id) {
-        return _hiddenIds()[String(id)] === true
-    }
-
     function _setHidden(ids) {
         cfg.hiddenDevices = Object.keys(ids).sort(function(a, b) { return a - b }).join(",")
         _rebuildAll()
@@ -1055,6 +1025,7 @@ Item {
     readonly property string defaultGfColor:  "#E65100"
     readonly property string sentPointPrefix: "qgis-"
     readonly property int    maxAreaChars:    4000      // Traccar keeps the area in a 4096-character column
+    readonly property int    routeBatch:      50        // devices per route-report request when loading a window
     readonly property var    deviceCategories: ["default", "animal", "bicycle", "boat", "bus", "camper", "car",
         "crane", "helicopter", "motorcycle", "offroad", "person", "pickup", "plane", "scooter", "ship",
         "tractor", "train", "tram", "trolleybus", "truck", "van"]       // Traccar's map icons
@@ -1368,7 +1339,7 @@ Item {
         name = String(name).trim()
         var t = Math.floor(Date.now() / 1000)
         var key = _addPending(name, lon, lat)
-        var fix = function(uid) {
+        var fix = function(uid, createdId) {
             var url = base + (base.indexOf("?") >= 0 ? "&" : "?") + "id=" + encodeURIComponent(uid)
                       + "&lat=" + lat.toFixed(7) + "&lon=" + lon.toFixed(7) + "&timestamp=" + t + "&valid=true"
             var xhr = new XMLHttpRequest()
@@ -1381,6 +1352,8 @@ Item {
                     if (done) done(true)
                 } else {
                     _dropPending(key)
+                    // A device added just for this point stays empty if its first fix is refused: remove it
+                    if (createdId) _send("DELETE", "/api/devices/" + createdId, null, function() {}, function() {})
                     mainWindow.displayToast(xhr.status === 0
                         ? "Send point: no response from " + base + " — check 'Send points to' in Settings → Connection"
                         : "Traccar refused the point for '" + name + "' (HTTP " + xhr.status + ")")
@@ -1395,6 +1368,14 @@ Item {
             devs.forEach(function(d) {
                 if (!uid && d.uniqueId && String(d.name || "").trim().toLowerCase() === name.toLowerCase()) uid = d.uniqueId
             })
+            if (uid && uid.indexOf(sentPointPrefix) !== 0) {
+                // Not a point added from QGIS / QField: it may be a real tracker — ask first
+                plugin.confirm("This moves '" + name + "' (identifier " + uid + ") to this spot.\n\n"
+                               + "It isn't a point added from QGIS or QField — it may be a real tracker, and its "
+                               + "track will jump there.\n\nMove it?",
+                               function() { fix(uid) }, "Move it", function() { _dropPending(key) })
+                return
+            }
             if (uid) { fix(uid); return }
             var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").substr(0, 30) || "point"
             var dt = details || {}
@@ -1403,7 +1384,7 @@ Item {
             if (dt.groupId) body.groupId = dt.groupId
             ;["phone", "model", "contact"].forEach(function(k) { if (dt[k]) body[k] = dt[k] })
             _send("POST", "/api/devices", body,
-                  function(d) { fix((d && d.uniqueId) || newUid) },
+                  function(d) { fix((d && d.uniqueId) || newUid, d && d.id) },
                   function(msg) {
                       _dropPending(key)
                       mainWindow.displayToast("Couldn't add '" + name + "' to Traccar (" + msg
@@ -1898,13 +1879,14 @@ Item {
                     }
                 }
                 Button {
+                    visible: !cfg.liveOn                // Live refreshes by itself
                     text: plugin.loading ? "…" : ""
                     icon.source: plugin.loading ? "" : "icons/refresh.svg"
                     enabled: !plugin.loading
                     onClicked: loadWindow()
                 }
                 Button {
-                    text: "Clear"
+                    text: "Clear map"
                     icon.source: "icons/clear.svg"
                     display: plugin.phone ? AbstractButton.IconOnly : AbstractButton.TextOnly   // room for Live on a phone
                     enabled: plugin.win !== null
@@ -2260,9 +2242,11 @@ Item {
     // ════════════════════════════════════════════════════════════════════════
 
     // Yes / No before anything is deleted
-    function confirm(text, action) {
-        confirmDialog.text   = text
-        confirmDialog.action = action
+    function confirm(text, action, okText, onCancel) {
+        confirmDialog.text     = text
+        confirmDialog.action   = action
+        confirmDialog.okText   = okText || "Delete"
+        confirmDialog.onCancel = onCancel || null
         confirmDialog.open()
     }
 
@@ -2279,6 +2263,8 @@ Item {
         z:       10
         property string text: ""
         property var    action: null
+        property string okText: "Delete"
+        property var    onCancel: null
         ColumnLayout {
             width: parent.width
             spacing: 12
@@ -2286,10 +2272,20 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
-                Button { text: "Cancel"; flat: true; onClicked: confirmDialog.close() }
                 Button {
-                    text: "Delete"
+                    text: "Cancel"
+                    flat: true
                     onClicked: {
+                        var c = confirmDialog.onCancel
+                        confirmDialog.onCancel = null
+                        confirmDialog.close()
+                        if (c) c()
+                    }
+                }
+                Button {
+                    text: confirmDialog.okText
+                    onClicked: {
+                        confirmDialog.onCancel = null
                         var a = confirmDialog.action
                         confirmDialog.action = null
                         confirmDialog.close()
@@ -2927,7 +2923,7 @@ Item {
                           "• Last 15 min … Last 3 months — follows the current time.\n" +
                           "• Custom dates — enter From / To in local time, tap Show this window.\n" +
                           "• From feature — use the start/end times of a feature (e.g. an incident). " +
-                          "Set the layer up once in Settings → Advanced.\n" +
+                          "Set the layer up once in Settings → Incident.\n" +
                           "Each device row shows how many fixes it has in the window and their time span."
                 }
 
@@ -3009,7 +3005,7 @@ Item {
                 Label { text: "Session tag"; font.bold: true; font.pixelSize: 15 }
                 Hint {
                     color: Theme.mainTextColor
-                    text: "Settings → Tag stamps a text such as FIRE-2026-001 onto everything you save. " +
+                    text: "Settings → Incident stamps a text such as FIRE-2026-001 onto everything you save. " +
                           "With 'From feature', the feature's display value can be used as the tag instead."
                 }
 
@@ -3056,7 +3052,7 @@ Item {
         property string page: ""   // "" = list, "connection", "layers", "tag", "advanced"
 
         readonly property var titles: ({ "": "Settings", "connection": "Connection",
-                                         "layers": "Layers", "tag": "Tag", "advanced": "Advanced" })
+                                         "layers": "Layers", "incident": "Incident", "advanced": "Advanced" })
 
         header: HeaderBar {
             RowLayout {
@@ -3121,15 +3117,14 @@ Item {
                 restoreSelection(gfLineCombo, lnLayerModel, cfg.geofenceLinesLayerName)
                 if (gfLineCombo.currentIndex < 0) gfLineCombo.currentIndex = 0
                 refreshNameFields()
-            } else if (page === "tag") {
-                populateFieldNames(fieldNameModel, [cfg.pointsLayerName, cfg.tracksLayerName])
-                restoreSelection(tagFieldCombo, fieldNameModel, cfg.incidentRefField)
-                if (tagFieldCombo.currentIndex < 0) tagFieldCombo.currentIndex = 0
-            } else if (page === "advanced") {
+            } else if (page === "incident") {
                 populateAllLayers(allLayerModel)
                 restoreSelection(eventLayerCombo, allLayerModel, cfg.eventLayerName)
                 if (eventLayerCombo.currentIndex < 0) eventLayerCombo.currentIndex = 0
                 refreshEventFields()
+                populateFieldNames(fieldNameModel, [cfg.pointsLayerName, cfg.tracksLayerName])
+                restoreSelection(tagFieldCombo, fieldNameModel, cfg.incidentRefField)
+                if (tagFieldCombo.currentIndex < 0) tagFieldCombo.currentIndex = 0
             }
         }
 
@@ -3201,11 +3196,12 @@ Item {
                         }
                     }
                     SettingsRow {
-                        title:   "Tag"
-                        onClicked: settingsDialog.page = "tag"
-                        summary: !cfg.incidentRefEnabled ? "Off"
+                        title:   "Incident"
+                        onClicked: settingsDialog.page = "incident"
+                        summary: "From feature: " + (cfg.eventLayerName !== "" ? cfg.eventLayerName : "not set up")
+                                 + "\nTag: " + (!cfg.incidentRefEnabled ? "off"
                                  : (cfg.sessionTag !== "" ? cfg.sessionTag : "(no text)")
-                                   + " → " + (cfg.incidentRefField !== "" ? cfg.incidentRefField : "no field")
+                                   + " → " + (cfg.incidentRefField !== "" ? cfg.incidentRefField : "no field"))
                     }
                     SettingsRow {
                         title:   "Advanced"
@@ -3213,8 +3209,7 @@ Item {
                         summary: (cfg.showButton ? "" : "Map button hidden  ·  ")
                                  + plugin._locationLabel(cfg.locationFormat) + "  ·  "
                                  + "Refresh every " + cfg.liveIntervalSec + " s  ·  grey after "
-                                 + cfg.staleMinutes + " min\nFrom feature: "
-                                 + (cfg.eventLayerName !== "" ? cfg.eventLayerName : "not set up")
+                                 + cfg.staleMinutes + " min"
                     }
                     Hint {
                         Layout.topMargin: 10
@@ -3398,11 +3393,46 @@ Item {
                     }
                 }
 
-                // ══ Tag ════════════════════════════════════════════════════
+                // ══ Incident: the time window "From feature" and the tag ═════
                 ColumnLayout {
-                    visible: settingsDialog.page === "tag"
+                    visible: settingsDialog.page === "incident"
                     Layout.fillWidth: true
                     spacing: 4
+                    Label { text: "Incident layer — time window \"From feature\""; font.bold: true; font.pixelSize: 15 }
+                    Hint { text: "Pick a layer whose features have start (and optional end) times, e.g. incidents." }
+                    Label { text: "Layer" }
+                    PickCombo {
+                        id: eventLayerCombo
+                        model: allLayerModel
+                        onActivated: {
+                            cfg.eventLayerName = pickedName(eventLayerCombo, allLayerModel)
+                            settingsDialog.refreshEventFields()
+                        }
+                    }
+                    Label { text: "Name shown in the list"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventDisplayCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventDisplayField = pickedName(eventDisplayCombo, eventFieldModel)
+                    }
+                    Label { text: "Start time field"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventStartCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventStartField = pickedName(eventStartCombo, eventFieldModel)
+                    }
+                    Label { text: "End time field (optional)"; visible: cfg.eventLayerName !== "" }
+                    PickCombo {
+                        id: eventEndCombo
+                        visible: cfg.eventLayerName !== ""
+                        model: eventFieldModel
+                        onActivated: cfg.eventEndField = pickedName(eventEndCombo, eventFieldModel)
+                    }
+
+                    Item { height: 8 }
+                    Label { text: "Tag"; font.bold: true; font.pixelSize: 15 }
 
                     Hint { text: "Stamp a text, e.g. an incident number, onto every point and track you save." }
                     CheckBox {
@@ -3504,39 +3534,6 @@ Item {
                         Label { text: "min" }
                     }
 
-                    Item { height: 8 }
-                    Label { text: "Time window \"From feature\""; font.bold: true; font.pixelSize: 15 }
-                    Hint { text: "Pick a layer whose features have start (and optional end) times, e.g. incidents." }
-                    Label { text: "Layer" }
-                    PickCombo {
-                        id: eventLayerCombo
-                        model: allLayerModel
-                        onActivated: {
-                            cfg.eventLayerName = pickedName(eventLayerCombo, allLayerModel)
-                            settingsDialog.refreshEventFields()
-                        }
-                    }
-                    Label { text: "Name shown in the list"; visible: cfg.eventLayerName !== "" }
-                    PickCombo {
-                        id: eventDisplayCombo
-                        visible: cfg.eventLayerName !== ""
-                        model: eventFieldModel
-                        onActivated: cfg.eventDisplayField = pickedName(eventDisplayCombo, eventFieldModel)
-                    }
-                    Label { text: "Start time field"; visible: cfg.eventLayerName !== "" }
-                    PickCombo {
-                        id: eventStartCombo
-                        visible: cfg.eventLayerName !== ""
-                        model: eventFieldModel
-                        onActivated: cfg.eventStartField = pickedName(eventStartCombo, eventFieldModel)
-                    }
-                    Label { text: "End time field (optional)"; visible: cfg.eventLayerName !== "" }
-                    PickCombo {
-                        id: eventEndCombo
-                        visible: cfg.eventLayerName !== ""
-                        model: eventFieldModel
-                        onActivated: cfg.eventEndField = pickedName(eventEndCombo, eventFieldModel)
-                    }
                 }
                 Item { height: 8 }
             }
@@ -3570,7 +3567,7 @@ Item {
         } else {
             if (eventFeatureModel.count === 0) populateEventFeatures()
             var f = _selectedEventFeature()
-            if (!f) return { error: "Choose a feature (set the layer up in Settings → Advanced)" }
+            if (!f) return { error: "Choose a feature (set the layer up in Settings → Incident)" }
             var dur = cfg.featureDuration * 60000
             if (cfg.featureSpan === 2) {
                 if (f.endIso === "") return { error: "That feature has no end time" }
@@ -3701,18 +3698,39 @@ Item {
                     _autoSave()
                 }
                 if (pending === 0) { pending = 1; done(); return }
-                ids.forEach(function(devId) {
-                    _get("/api/positions?deviceId=" + devId
-                            + "&from=" + encodeURIComponent(w.fromIso)
-                            + "&to="   + encodeURIComponent(w.toIso),
-                        function(hist) {
-                            var valid = hist.filter(_valid)
-                            valid.sort(_byFixTime)
-                            if (valid.length > 0) byDev[String(devId)] = valid
-                            done()
-                        },
-                        function(msg) { failed++; done() })
-                })
+                var range = "&from=" + encodeURIComponent(w.fromIso) + "&to=" + encodeURIComponent(w.toIso)
+                var perDevice = function(batch) {          // fallback: servers that refuse the route report
+                    batch.forEach(function(devId) {
+                        _get("/api/positions?deviceId=" + devId + range,
+                            function(hist) {
+                                var valid = hist.filter(_valid)
+                                valid.sort(_byFixTime)
+                                if (valid.length > 0) byDev[String(devId)] = valid
+                                done()
+                            },
+                            function(msg) { failed++; done() })
+                    })
+                }
+                // One route report per batch of devices instead of one request per device
+                for (var b = 0; b < ids.length; b += routeBatch) {
+                    (function(batch) {
+                        _get("/api/reports/route?" + batch.map(function(d) { return "deviceId=" + d }).join("&") + range,
+                            function(rows) {
+                                (rows || []).forEach(function(p) {
+                                    if (!_valid(p)) return
+                                    var k = String(p.deviceId)
+                                    if (batch.indexOf(k) < 0) return
+                                    if (!byDev[k]) byDev[k] = []
+                                    byDev[k].push(p)
+                                })
+                                batch.forEach(function(k) {
+                                    if (byDev[k]) byDev[k].sort(_byFixTime)
+                                    done()
+                                })
+                            },
+                            function(msg) { perDevice(batch) })
+                    })(ids.slice(b, b + routeBatch))
+                }
             }, onErr)
         }, function(msg) {
             if (msg.indexOf("401") >= 0) plugin.connState = "wrong username or password"
