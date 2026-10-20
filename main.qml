@@ -1366,9 +1366,8 @@ Item {
             xhr.onreadystatechange = function() {
                 if (xhr.readyState !== XMLHttpRequest.DONE) return
                 if (xhr.status === 200) {
-                    _confirmPending(key)
                     mainWindow.displayToast("Sent to Traccar as '" + name + "'")
-                    if (plugin.win !== null && plugin.win.moving) sendRefresh.restart()
+                    _confirmPending(key)                // refreshes until it shows, Live on or off
                     if (done) done(true)
                 } else {
                     _dropPending(key)
@@ -1404,7 +1403,25 @@ Item {
         }, function(msg) { _dropPending(key); mainWindow.displayToast("Send point needs your Traccar login: " + msg) })
     }
 
-    Timer { id: sendRefresh; interval: 2000; onTriggered: pollLive() }
+    // Every 2 s after Traccar accepted a point: refresh until the real device is shown (the refresh
+    // drops the stand-in). In a fixed past window, or with nothing loaded, it can't be shown: drop it
+    // now. Gives up after 5 tries.
+    Timer { id: pendingTimer; interval: 2000; repeat: true; onTriggered: plugin._pendingTick() }
+    function _pendingTick() {
+        var done = plugin.pendingPoints.filter(function(m) { return m.confirmed > 0 })
+        if (done.length === 0) { pendingTimer.stop(); return }
+        if (plugin.win === null || !plugin.win.moving) {
+            plugin.pendingPoints = plugin.pendingPoints.filter(function(m) { return m.confirmed === 0 })
+            mainWindow.displayToast("Sent — not shown here: the time window ends in the past. Choose a 'Last …' window to see it.")
+            pendingTimer.stop()
+            return
+        }
+        plugin.pendingPoints = plugin.pendingPoints.map(function(m) {
+            return m.confirmed > 0 ? { key: m.key, name: m.name, lon: m.lon, lat: m.lat, confirmed: m.confirmed,
+                                       tries: (m.tries || 0) + 1 } : m
+        }).filter(function(m) { return !(m.tries > 5) })
+        if (!plugin.loading) pollLive()
+    }
 
     // ── Points being sent: shown at once, until a refresh after Traccar accepted them ──
     function _addPending(name, lon, lat) {
@@ -1418,7 +1435,8 @@ Item {
     }
     function _confirmPending(key) {
         plugin.pendingPoints = plugin.pendingPoints.map(function(m) {
-            return m.key === key ? { key: m.key, name: m.name, lon: m.lon, lat: m.lat, confirmed: Date.now() } : m })
+            return m.key === key ? { key: m.key, name: m.name, lon: m.lon, lat: m.lat, confirmed: Date.now(), tries: 0 } : m })
+        pendingTimer.start()
     }
     // A refresh that started after Traccar accepted a point shows the real device: drop its stand-in
     function _settlePending(fetchStarted) {

@@ -760,6 +760,19 @@ ApplicationWindow {
         },
         function() {
             cfg.sendUrl = L.keepSendUrl
+            L.winSave = plugin.win
+            var w = JSON.parse(JSON.stringify(plugin.win))
+            w.moving = false                             // as a custom-dates window that ends in the past
+            plugin.win = w
+            plugin.sendPoint("Van 3", -6.308, 53.365)
+            waitFor("past window: stand-in goes once accepted", function() {
+                return toasts.some(function(t) { return t.indexOf("not shown here") >= 0 })
+                       && !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }) }, 8000)
+        },
+        function() {
+            check("fixed past window: the stand-in goes once Traccar accepts the point",
+                  !plugin.pendingPoints.some(function(m) { return m.name === "Van 3" }))
+            plugin.win = L.winSave
             toolbarRow.children[0].clicked()        // draw the lists with geofences and a sent point
             sleep(200)
         },
