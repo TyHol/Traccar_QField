@@ -156,6 +156,7 @@ Item {
     property int    pendingSeq:   0
     property var    autoUpto:     ({})    // devId → newest fix auto-saved (UTC ms)
     property var    autoTrackUpto: ({})   // devId → newest fix in its auto-saved track
+    property double autoTrackNext: 0      // auto-save: no track rewrite before this time (ms) — see _autoSave()
     property var    gfSaved:      ({})    // geofence id → its JSON when last saved
     property string lastAutoSave: ""
     property var    groups:       []      // Traccar groups and calendars, for the send form
@@ -4180,7 +4181,9 @@ Item {
 
     // After a refresh / Live update (Settings → Layers → Save automatically): what's new only.
     // Positions: each shown device's fixes newer than the last saved one (latest fix, or every fix).
-    // Tracks: each device with new fixes, its track replaced. Quiet unless something fails.
+    // Tracks: each device with new fixes, its track replaced — backing off for long tracks: after a
+    // rewrite, the next waits at least 20x as long as it took (at most 10 min), so writing never takes
+    // more than about 5% of the time (a slow phone backs off further by itself). Quiet unless something fails.
     function _autoSave() {
         if (!cfg.autoSave || plugin.win === null) return
         var hidden = _hiddenIds()
@@ -4221,7 +4224,7 @@ Item {
                 })
             }
         }
-        if (cfg.tracksLayerName !== "") {
+        if (cfg.tracksLayerName !== "" && Date.now() >= plugin.autoTrackNext) {
             var done = {}
             for (var d in plugin.autoTrackUpto) done[d] = plugin.autoTrackUpto[d]
             var byDev = {}, n = 0
@@ -4236,7 +4239,12 @@ Item {
             if (n > 0) {
                 var info = { fromIso: plugin.win.fromIso, toIso: plugin.win.toIso, lookup: plugin.deviceInfo,
                              tag: plugin.win.tag, replace: true }
-                _queueWrite(function() { _writeTracks(byDev, info) })
+                plugin.autoTrackNext = Date.now() + 600000      // until this write has run and been timed
+                _queueWrite(function() {
+                    var began = Date.now()
+                    _writeTracks(byDev, info)
+                    plugin.autoTrackNext = Date.now() + Math.min(600000, 20 * (Date.now() - began))
+                })
             }
         }
         plugin.lastAutoSave = Qt.formatTime(new Date(), "HH:mm:ss")

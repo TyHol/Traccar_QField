@@ -962,6 +962,29 @@ ApplicationWindow {
             check("a new fix: one more point; that device's track replaced (still one per device)",
                   L.ap._committed.length === L.nMarkers + 1 && L.at._committed.length === L.nTracks,
                   L.ap._committed.length + ", " + L.at._committed.length)
+            check("after a track rewrite the next waits 20x its time (here: short, at most 10 min)",
+                  plugin.autoTrackNext >= Date.now() - 1000 && plugin.autoTrackNext <= Date.now() + 600000)
+            L.trk1 = L.at._committed.filter(function(f) { return f.attribute("device_id") === 1 })[0]
+            L.nPts = L.ap._committed.length
+            plugin.autoTrackNext = Date.now() + 60000          // as after a slow rewrite of a long track
+            httpGet("/test/addfix?dev=1")
+            sleep(300)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("point saved while the track waits", function() { return L.ap._committed.length === L.nPts + 1 })
+        },
+        function() {
+            check("backing off: the new fix is saved as a point, the track waits",
+                  L.at._committed.filter(function(f) { return f.attribute("device_id") === 1 })[0] === L.trk1)
+            plugin.autoTrackNext = 0
+            plugin.pollLive()
+            waitFor("track rewritten after the wait", function() {
+                return L.at._committed.filter(function(f) { return f.attribute("device_id") === 1 })[0] !== L.trk1 })
+        },
+        function() {
+            check("…and the next refresh after the wait rewrites the track with everything since",
+                  L.at._committed.length === L.nTracks)
             var before = L.gfp._committed.length
             plugin.loadGeofences()
             sleep(500)

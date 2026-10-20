@@ -15,6 +15,9 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   device's new fixes (latest or every fix), its track kept to the most recent one, and geofences that
   changed. Waits for QFieldCloud syncs like Save; reads the newest fix already in the layer first, so
   nothing is saved twice.
+  Long tracks back off by themselves: after a track rewrite, the next waits at least 20x as long as it
+  took (at most 10 minutes), so writing never takes more than about 5% of the time; new positions are
+  still saved on every refresh.
 
 - **A sent geofence stays on the map** while Traccar saves it — *sending…* in the Geofences tab —
   instead of vanishing until the reload; Traccar's copy then replaces it (or, if Traccar refused it, it
