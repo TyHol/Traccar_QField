@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 """
-Create traccar_template.gpkg — empty points and tracks layers with every field
-the Traccar Live plugin fills. Add both layers to your QGIS project, then pick
-them in the plugin under Settings → Layers.
+Create traccar_template.gpkg — empty points, tracks and geofence (polygon, line)
+layers with every field the Traccar Live plugin fills. Add the layers to your
+QGIS project, then pick them in the plugin under Settings → Layers.
 
 Plain Python (sqlite3 only, no GDAL needed):
     python tools/make_template_gpkg.py [output.gpkg]
@@ -51,6 +51,22 @@ LAYERS = [
         ("saved_at",    "DATETIME"),
         ("tag",         "TEXT"),
     ]),
+] + [
+    (table, gtype, 0, 0, desc, [
+        ("geofence_id", "INTEGER"),   # Traccar's id: saving again replaces the geofence
+        ("name",        "TEXT"),
+        ("description", "TEXT"),
+        ("type",        "TEXT"),      # area, circle, line
+        ("radius_m",    "REAL"),      # circles
+        ("speed_kmh",   "REAL"),
+        ("color",       "TEXT"),
+        ("calendar",    "TEXT"),
+        ("made_in",     "TEXT"),      # QGIS / QField or Traccar
+        ("saved_at",    "DATETIME"),
+        ("tag",         "TEXT"),
+    ]) for table, gtype, desc in (
+        ("traccar_geofences", "POLYGON", "Traccar Live — saved geofences: areas and circles"),
+        ("traccar_geofence_lines", "LINESTRING", "Traccar Live — saved geofences: lines"))
 ]
 
 

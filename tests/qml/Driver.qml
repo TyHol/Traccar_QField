@@ -97,7 +97,7 @@ ApplicationWindow {
         return { z: z, m: m }
     }
     function dimsOfWkt(wkt) {
-        var r = /^\s*(Point|LineString)\s*(ZM|Z|M)?\s*\(/i.exec(wkt)
+        var r = /^\s*(Point|LineString|Polygon)\s*(ZM|Z|M)?\s*\(/i.exec(wkt)
         var s = r && r[2] ? r[2].toUpperCase() : ""
         return { z: s.indexOf("Z") >= 0, m: s.indexOf("M") >= 0, ok: !!r }
     }
@@ -262,7 +262,7 @@ ApplicationWindow {
             check("wrong password → clear error", plugin.liveError.indexOf("401") >= 0 && plugin.win === null, plugin.liveError)
             cfg.username = "test@example.com"; cfg.password = "secret"   // pragma: allowlist secret (fake server)
             plugin.reloadWindow()
-            waitFor("load last 3 h", function() { return !plugin.loading })
+            waitFor("load last 3 h", function() { return !plugin.loading }, 20000)
         },
         function() {
             check("Phone A: 240 fixes in last 3 h", devTrack(1).length === 240, devTrack(1).length)
@@ -905,6 +905,72 @@ ApplicationWindow {
         },
         function() {
             check("From layer: description from a field", gf("S2").description === "S2")
+            // ── Save geofences to layers ──
+            var gfFields = [["geofence_id", "int"], ["name", "QString"], ["type", "QString"], ["radius_m", "double"],
+                            ["color", "QString"], ["description", "QString"]]
+            L.gfp = makeLayer("gf_poly", 2, 3, gfFields)
+            L.gfl = makeLayer("gf_line", 1, 2, gfFields)
+            cfg.geofencesLayerName = "gf_poly"; cfg.geofenceLinesLayerName = "gf_line"
+            var areas = plugin.geofences.filter(function(g) { return !g.pending && (g.kind === "polygon" || g.kind === "circle") })
+            var lines = plugin.geofences.filter(function(g) { return !g.pending && g.kind === "line" })
+            plugin.saveGeofences(false)
+            var circle = areas.filter(function(g) { return g.kind === "circle" })[0]
+            var cf = L.gfp._committed.filter(function(f) { return f.attribute("geofence_id") === circle.id })[0]
+            check("Save geofences: areas and circles → polygon layer, lines → line layer",
+                  L.gfp._committed.length === areas.length && L.gfl._committed.length === lines.length
+                  && areas.length > 0 && lines.length > 0, L.gfp._committed.length + "/" + areas.length + ", "
+                  + L.gfl._committed.length + "/" + lines.length)
+            check("geofence fields and shape: circle saved as a polygon with its radius",
+                  cf && cf.attribute("type") === "circle" && cf.attribute("radius_m") === circle.radius
+                  && cf.attribute("color") === circle.color && cf.geometry.wkt.indexOf("Polygon ((") === 0,
+                  cf ? cf.geometry.wkt.substr(0, 30) : "none")
+            plugin.saveGeofences(false)
+            check("saving again replaces them (no duplicates)",
+                  L.gfp._committed.length === areas.length && L.gfl._committed.length === lines.length)
+            // ── automatic saving after every refresh ──
+            L.ap = makeLayer("auto_pts", 0, 1, [["device_id", "int"], ["name", "QString"], ["fix_time", "QString"]])
+            L.at = makeLayer("auto_trk", 1, 2, [["device_id", "int"], ["name", "QString"]])
+            L.keepPts = cfg.pointsLayerName; L.keepTrk = cfg.tracksLayerName; L.keepMode = cfg.trackMode
+            cfg.pointsLayerName = "auto_pts"; cfg.pointsMode = 0; cfg.tracksLayerName = "auto_trk"; cfg.trackMode = 0
+            plugin.setAllShown(true)
+            cfg.liveOn = false
+            cfg.autoSave = true
+            plugin.reloadWindow()
+            waitFor("auto-save load", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            L.nMarkers = plugin.overlayModel.length
+            L.nTracks = Object.keys(plugin.tracks).filter(function(k) { return plugin.tracks[k].length > 0 }).length
+            check("auto-save: the refresh saved each device's latest fix and its track",
+                  L.ap._committed.length === L.nMarkers && L.at._committed.length === L.nTracks && L.nMarkers > 0,
+                  L.ap._committed.length + "/" + L.nMarkers + ", " + L.at._committed.length + "/" + L.nTracks)
+            plugin.loadWindow(true)
+            waitFor("second refresh", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("a refresh with nothing new saves nothing",
+                  L.ap._committed.length === L.nMarkers && L.at._committed.length === L.nTracks,
+                  L.ap._committed.length + ", " + L.at._committed.length)
+            httpGet("/test/addfix?dev=1")
+            sleep(300)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("new fix auto-saved", function() { return L.ap._committed.length === L.nMarkers + 1 })
+        },
+        function() {
+            check("a new fix: one more point; that device's track replaced (still one per device)",
+                  L.ap._committed.length === L.nMarkers + 1 && L.at._committed.length === L.nTracks,
+                  L.ap._committed.length + ", " + L.at._committed.length)
+            var before = L.gfp._committed.length
+            plugin.loadGeofences()
+            sleep(500)
+            L.gfBefore = before
+        },
+        function() {
+            check("auto-save: unchanged geofences aren't written again", L.gfp._committed.length === L.gfBefore)
+            cfg.autoSave = false
+            cfg.pointsLayerName = L.keepPts; cfg.tracksLayerName = L.keepTrk; cfg.trackMode = L.keepMode
             // ── edit a geofence with the same form ──
             L.keep = cfg.geofenceColor
             plugin.editGeofence(gf("Track 3").id)

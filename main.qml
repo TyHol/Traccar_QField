@@ -84,6 +84,9 @@ Item {
         property string tracksLayerName: ""
         property string tracksNameField: ""
         property int    trackMode:       0      // 0 = add a new track per save, 1 = keep most recent only
+        property string geofencesLayerName:     ""   // polygon layer: areas and circles (Save geofences)
+        property string geofenceLinesLayerName: ""   // line layer: line geofences
+        property bool   autoSave:        false  // save to the layers after every refresh / Live update
 
         // Session tag
         property bool   incidentRefEnabled: false
@@ -151,6 +154,10 @@ Item {
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
     property var    pendingPoints: []     // points just sent: {key, name, lon, lat, confirmed} — drawn until a refresh
     property int    pendingSeq:   0
+    property var    autoUpto:     ({})    // devId → newest fix auto-saved (UTC ms)
+    property var    autoTrackUpto: ({})   // devId → newest fix in its auto-saved track
+    property var    gfSaved:      ({})    // geofence id → its JSON when last saved
+    property string lastAutoSave: ""
     property var    groups:       []      // Traccar groups and calendars, for the send form
     property var    calendars:    []
 
@@ -161,6 +168,7 @@ Item {
     // ── Models for pickers ────────────────────────────────────────────────
     ListModel { id: ptLayerModel }
     ListModel { id: lnLayerModel }
+    ListModel { id: pgLayerModel }      // polygon layers (geofences)
     ListModel { id: ptNameFieldModel }  // text fields of the points layer
     ListModel { id: lnNameFieldModel }  // text fields of the tracks layer
     ListModel { id: fieldNameModel }    // fields of both layers (tag field picker)
@@ -1136,6 +1144,7 @@ Item {
             var out = data.map(function(g) { return _gfEntry(g, false) })
             out.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) })
             plugin.geofences = out
+            if (cfg.autoSave) saveGeofences(true)
         }, function(msg) { console.log("Traccar Live: geofences: " + msg) })
         // For the send form; an account without access just gets empty lists
         var byName = function(a, b) { return String(a.name || "").toLowerCase().localeCompare(String(b.name || "").toLowerCase()) }
@@ -2072,6 +2081,13 @@ Item {
                             nextCheckState: function() { return nShown === plugin.geofences.length ? Qt.Unchecked : Qt.Checked }
                             onClicked: plugin.setAllGeofencesShown(checkState === Qt.Checked)
                         }
+                        Button {
+                            text: "Save"
+                            icon.source: "icons/save.svg"
+                            flat: true
+                            enabled: plugin.geofences.length > 0
+                            onClicked: plugin.saveGeofences(false)
+                        }
                         DetailsButton { kind: "geofence" }
                     }
                     Hint {
@@ -2973,6 +2989,10 @@ Item {
                           "Fields are filled by name (device_id, name, fix_time, speed_kmh, battery, " +
                           "start_time, last_update, …); fields your layer doesn't have are skipped. " +
                           "You can also send the device name to any text field, e.g. 'title'.\n" +
+                          "Save (Geofences tab) — Traccar's geofences to the geofence layers in Settings → Layers: " +
+                          "areas and circles (as polygons) and lines; saving again replaces each one by geofence_id.\n" +
+                          "Save automatically (Settings → Layers) — after every refresh and Live update, only what's " +
+                          "new: each device's new fixes, its track (the most recent one) and geofences that changed.\n" +
                           "If QFieldCloud is syncing, the save waits and runs when it finishes."
                 }
 
@@ -3094,6 +3114,11 @@ Item {
                 populateLayers(lnLayerModel, Qgis.GeometryType.Line)
                 restoreSelection(tracksLayerCombo, lnLayerModel, cfg.tracksLayerName)
                 if (tracksLayerCombo.currentIndex < 0) tracksLayerCombo.currentIndex = 0
+                populateLayers(pgLayerModel, Qgis.GeometryType.Polygon)
+                restoreSelection(gfPolyCombo, pgLayerModel, cfg.geofencesLayerName)
+                if (gfPolyCombo.currentIndex < 0) gfPolyCombo.currentIndex = 0
+                restoreSelection(gfLineCombo, lnLayerModel, cfg.geofenceLinesLayerName)
+                if (gfLineCombo.currentIndex < 0) gfLineCombo.currentIndex = 0
                 refreshNameFields()
             } else if (page === "tag") {
                 populateFieldNames(fieldNameModel, [cfg.pointsLayerName, cfg.tracksLayerName])
@@ -3161,13 +3186,17 @@ Item {
                         onClicked: settingsDialog.page = "layers"
                         warn:    cfg.pointsLayerName === "" && cfg.tracksLayerName === ""
                         summary: {
-                            if (cfg.pointsLayerName === "" && cfg.tracksLayerName === "")
+                            if (cfg.pointsLayerName === "" && cfg.tracksLayerName === ""
+                                    && cfg.geofencesLayerName === "" && cfg.geofenceLinesLayerName === "")
                                 return "Nothing to save to yet"
                             var p = cfg.pointsLayerName === "" ? "—" : cfg.pointsLayerName
                                     + (cfg.pointsNameField !== "" ? " (name → " + cfg.pointsNameField + ")" : "")
                             var t = cfg.tracksLayerName === "" ? "—" : cfg.tracksLayerName
                                     + (cfg.tracksNameField !== "" ? " (name → " + cfg.tracksNameField + ")" : "")
+                            var g = [cfg.geofencesLayerName, cfg.geofenceLinesLayerName].filter(function(x) { return x !== "" })
                             return "Positions → " + p + "\nTracks → " + t
+                                   + (g.length ? "\nGeofences → " + g.join(" + ") : "")
+                                   + (cfg.autoSave ? "\nSaving automatically after every refresh" : "")
                         }
                     }
                     SettingsRow {
@@ -3324,12 +3353,46 @@ Item {
                         text: "Replaces that device's earlier tracks — matched by device_id, " +
                               "or by the device name field if the layer has no device_id."
                     }
+                    Item { height: 8 }
+                    Label { text: "Geofences"; font.bold: true; font.pixelSize: 15 }
+                    Label { text: "Areas and circles (polygon layer)" }
+                    PickCombo {
+                        id: gfPolyCombo
+                        model: pgLayerModel
+                        onActivated: cfg.geofencesLayerName = pickedName(gfPolyCombo, pgLayerModel)
+                    }
+                    Label { text: "Lines (line layer)" }
+                    PickCombo {
+                        id: gfLineCombo
+                        model: lnLayerModel
+                        onActivated: cfg.geofenceLinesLayerName = pickedName(gfLineCombo, lnLayerModel)
+                    }
+                    Hint {
+                        text: "Save in the Geofences tab writes Traccar's geofences here; saving again replaces " +
+                              "each one (matched by geofence_id). Circles are saved as polygons."
+                    }
+
+                    Item { height: 8 }
+                    Label { text: "Automatic saving"; font.bold: true; font.pixelSize: 15 }
+                    Switch {
+                        text:    "Save after every refresh and Live update"
+                        checked: cfg.autoSave
+                        onToggled: cfg.autoSave = checked
+                        Layout.fillWidth: true
+                    }
+                    Hint {
+                        text: "Only what's new: each device's new fixes (latest fix or every fix, as above) and its " +
+                              "track, kept to the most recent one; geofences that changed. Hidden devices are left " +
+                              "out. Waits for QFieldCloud syncs, like Save."
+                    }
+
                     Item { height: 6 }
                     Hint {
                         text: "Fields are filled when the layer has them: device_id, name, fix_time, " +
                               "fix_local, speed_kmh, course, altitude_m, accuracy_m, battery, address, motion, " +
                               "fetched_at (points); start_time, last_update, start_local, last_local, " +
-                              "from_time, to_time, n_points, saved_at (tracks). " +
+                              "from_time, to_time, n_points, saved_at (tracks); geofence_id, name, description, " +
+                              "type, radius_m, speed_kmh, color, calendar, made_in, saved_at (geofences). " +
                               "traccar_template.gpkg has them all."
                     }
                 }
@@ -3634,6 +3697,7 @@ Item {
                     plugin.lastFetched = Qt.formatTime(new Date(), "HH:mm:ss")
                     _rebuildAll()
                     _settlePending(started)
+                    _autoSave()
                 }
                 if (pending === 0) { pending = 1; done(); return }
                 ids.forEach(function(devId) {
@@ -3706,6 +3770,7 @@ Item {
                 plugin.lastFetched = Qt.formatTime(now, "HH:mm:ss")
                 _rebuildAll()
                 _settlePending(started)
+                _autoSave()
             }, onErr)
         }, onErr)
     }
@@ -3900,7 +3965,7 @@ Item {
         var nameField = _nameFieldFor(fnames, cfg.tracksNameField)
 
         // "Keep most recent": match earlier tracks by device_id, else by device name
-        var replace    = cfg.trackMode === 1
+        var replace    = info.replace !== undefined ? info.replace : cfg.trackMode === 1
         var matchField = fnames.indexOf("device_id") >= 0 ? "device_id" : nameField
         if (replace && matchField === "") {
             mainWindow.displayToast("Tracks layer has no device_id or device name field — adding instead of replacing")
@@ -4016,6 +4081,188 @@ Item {
             if (LayerUtils.addFeature(lyr, feat)) added++
         })
         return added
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  SAVE GEOFENCES and AUTOMATIC SAVING
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Traccar's geofences → the geofence layers: areas and circles (as polygons) to one, lines to the
+    // other; each replaced by its geofence_id (name if the layer has none). auto: quietly, and only
+    // geofences that changed since the last save.
+    function saveGeofences(auto) {
+        if (cfg.geofencesLayerName === "" && cfg.geofenceLinesLayerName === "") {
+            if (!auto) { mainWindow.displayToast("Choose a layer for geofences first"); openSettings("layers") }
+            return
+        }
+        var gfs = plugin.geofences.filter(function(g) { return !g.pending && g.kind !== "" })
+        if (auto) gfs = gfs.filter(function(g) { return plugin.gfSaved[String(g.id)] !== JSON.stringify(g.raw) })
+        if (gfs.length === 0) {
+            if (!auto) mainWindow.displayToast("No geofences to save — tap Refresh to load them")
+            return
+        }
+        var cal = {}
+        plugin.calendars.forEach(function(c) { cal[c.id] = c.name || "" })
+        var tag = plugin.win ? plugin.win.tag : ""
+        var marked = {}
+        gfs.forEach(function(g) { marked[String(g.id)] = JSON.stringify(g.raw) })
+        var s = {}
+        for (var k in plugin.gfSaved) s[k] = plugin.gfSaved[k]
+        for (var k2 in marked) s[k2] = marked[k2]
+        plugin.gfSaved = s                  // marked now, so a second refresh doesn't queue them again
+        _queueWrite(function() {
+            var total = 0
+            var jobs = [{ name: cfg.geofencesLayerName, kinds: ["polygon", "circle"] },
+                        { name: cfg.geofenceLinesLayerName, kinds: ["line"] }]
+            jobs.forEach(function(job) {
+                var mine = gfs.filter(function(g) { return job.kinds.indexOf(g.kind) >= 0 })
+                if (job.name === "" || mine.length === 0) return
+                var lyr = _layerByName(job.name, "Geofences")
+                if (!lyr) return
+                var n = _writeGeofences(lyr, mine, cal, tag)
+                if (n >= 0) total += n
+            })
+            if (!auto && total > 0) mainWindow.displayToast("Saved " + total + " geofence(s)")
+        })
+    }
+
+    function _writeGeofences(lyr, gfs, cal, tag) {
+        var fnames = lyr.fields.names
+        var match  = fnames.indexOf("geofence_id") >= 0 ? "geofence_id" : (fnames.indexOf("name") >= 0 ? "name" : "")
+        var keys = {}
+        gfs.forEach(function(g) { keys[match === "geofence_id" ? String(g.id) : g.name] = true })
+        var oldFids = []
+        if (match !== "") {
+            try {
+                var iter = LayerUtils.createFeatureIterator(lyr)
+                while (iter.hasNext()) {
+                    var f = iter.next()
+                    if (keys[String(f.attribute(match))] === true) oldFids.push(f.id)
+                }
+                iter.close()
+            } catch(e) { mainWindow.displayToast("Geofences layer read error: " + e); return -1 }
+        }
+        var dims = _layerDims(lyr)
+        var savedAt = new Date().toISOString()
+        var written = 0
+        try {
+            lyr.startEditing()
+            for (var i = 0; i < oldFids.length; i++) lyr.deleteFeature(oldFids[i])
+            gfs.forEach(function(g) {
+                var c = g.coords.slice()
+                if (g.kind !== "line" && c.length > 0 && (c[0].lon !== c[c.length - 1].lon || c[0].lat !== c[c.length - 1].lat))
+                    c.push(c[0])
+                var verts = c.map(function(q) {
+                    var xy = _xyForLayer(lyr, q.lon, q.lat)
+                    return xy.x + " " + xy.y + (dims.z ? " 0" : "") + (dims.m ? " 0" : "")
+                })
+                var wkt = g.kind === "line" ? "LineString" + dims.tag + " (" + verts.join(", ") + ")"
+                                            : "Polygon" + dims.tag + " ((" + verts.join(", ") + "))"
+                var feat = FeatureUtils.createFeature(lyr, GeometryUtils.createGeometryFromWkt(wkt))
+                _setAttributes(feat, fnames, {
+                    geofence_id: g.id, name: g.name, description: g.description,
+                    type: g.kind === "polygon" ? "area" : g.kind,
+                    radius_m: g.kind === "circle" ? g.radius : null, speed_kmh: g.speedKmh || null,
+                    color: g.color, calendar: cal[(g.raw || {}).calendarId] || "",
+                    made_in: g.mine ? "QGIS / QField" : "Traccar", saved_at: savedAt }, tag)
+                if (LayerUtils.addFeature(lyr, feat)) written++
+            })
+            if (written === 0) throw "the layer did not accept the geofences"
+            if (!lyr.commitChanges()) throw "the layer could not save the geofences"
+            lyr.triggerRepaint()
+        } catch(e) {
+            try { lyr.rollBack() } catch(e2) {}
+            mainWindow.displayToast("Geofences layer error: " + e)
+            return -1
+        }
+        return written
+    }
+
+    // After a refresh / Live update (Settings → Layers → Save automatically): what's new only.
+    // Positions: each shown device's fixes newer than the last saved one (latest fix, or every fix).
+    // Tracks: each device with new fixes, its track replaced. Quiet unless something fails.
+    function _autoSave() {
+        if (!cfg.autoSave || plugin.win === null) return
+        var hidden = _hiddenIds()
+        var upto = {}
+        for (var u in plugin.autoUpto) upto[u] = plugin.autoUpto[u]
+        if (cfg.pointsLayerName !== "") {
+            var lyr = _layerByNameQuiet(cfg.pointsLayerName)
+            var newer = function(p) {
+                var k = String(p.deviceId)
+                if (upto[k] === undefined) upto[k] = lyr ? _newestSaved(lyr, k) : 0
+                return new Date(p.fixTime).getTime() > upto[k]
+            }
+            var positions = []
+            if (cfg.pointsMode === 1) {
+                for (var t in plugin.tracks) if (!hidden[t]) positions = positions.concat(plugin.tracks[t].filter(newer))
+            } else {
+                for (var m in plugin.markerPos) if (!hidden[m] && newer(plugin.markerPos[m])) positions.push(plugin.markerPos[m])
+            }
+            positions.forEach(function(p) {
+                var k = String(p.deviceId)
+                upto[k] = Math.max(upto[k] || 0, new Date(p.fixTime).getTime())
+            })
+            plugin.autoUpto = upto
+            if (positions.length > 0) {
+                var lookup = plugin.deviceInfo, tag = plugin.win.tag
+                _queueWrite(function() {
+                    var l2 = _layerByName(cfg.pointsLayerName, "Positions")
+                    if (!l2) return
+                    try {
+                        l2.startEditing()
+                        if (_writePointsToLayer(l2, positions, lookup, tag) === 0) throw "the layer did not accept the points"
+                        if (!l2.commitChanges()) throw "the layer could not save the points"
+                        l2.triggerRepaint()
+                    } catch(e) {
+                        try { l2.rollBack() } catch(e2) {}
+                        mainWindow.displayToast("Positions layer error: " + e)
+                    }
+                })
+            }
+        }
+        if (cfg.tracksLayerName !== "") {
+            var done = {}
+            for (var d in plugin.autoTrackUpto) done[d] = plugin.autoTrackUpto[d]
+            var byDev = {}, n = 0
+            for (var k3 in plugin.tracks) {
+                var arr = plugin.tracks[k3]
+                if (hidden[k3] || arr.length === 0) continue
+                var last = new Date(arr[arr.length - 1].fixTime).getTime()
+                if (done[k3] === last) continue
+                byDev[k3] = arr; done[k3] = last; n++
+            }
+            plugin.autoTrackUpto = done
+            if (n > 0) {
+                var info = { fromIso: plugin.win.fromIso, toIso: plugin.win.toIso, lookup: plugin.deviceInfo,
+                             tag: plugin.win.tag, replace: true }
+                _queueWrite(function() { _writeTracks(byDev, info) })
+            }
+        }
+        plugin.lastAutoSave = Qt.formatTime(new Date(), "HH:mm:ss")
+    }
+
+    // The newest fix_time (UTC ms) of this device already in the layer; 0 if none / no such fields
+    function _newestSaved(lyr, devKey) {
+        var names = lyr.fields.names
+        if (names.indexOf("device_id") < 0 || names.indexOf("fix_time") < 0) return 0
+        var best = 0
+        try {
+            var iter = LayerUtils.createFeatureIterator(lyr)
+            while (iter.hasNext()) {
+                var f = iter.next()
+                if (String(f.attribute("device_id")) !== devKey) continue
+                var iso = _attrToIsoUtc(f.attribute("fix_time"))
+                if (iso !== "") best = Math.max(best, new Date(iso).getTime())
+            }
+            iter.close()
+        } catch(e) {}
+        return best
+    }
+
+    function _layerByNameQuiet(name) {
+        var layers = qgisProject.mapLayersByName(name)
+        return layers.length > 0 ? layers[0] : null
     }
 
     // ════════════════════════════════════════════════════════════════════════
