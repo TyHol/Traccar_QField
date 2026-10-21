@@ -1094,9 +1094,9 @@ ApplicationWindow {
             check("…not even after a restart (what's in the layer is read first)", L.ap2._committed.length === L.n180,
                   L.ap2._committed.length)
             // ── only the saved fixes that could come up again are read, in one pass ──
-            L.oldIso = new Date(Date.now() - 30 * 86400000).toISOString()
+            var oldIso = L.oldIso = new Date(Date.now() - 30 * 86400000).toISOString()
             L.ap2._committed.push({ id: 9999, geometry: { wkt: "Point (-6.3 53.3)" },
-                                    attribute: function(n) { return n === "device_id" ? 1 : n === "fix_time" ? L.oldIso : null } })
+                                    attribute: function(n) { return n === "device_id" ? 1 : n === "fix_time" ? oldIso : null } })
             L.ap2._exprReads = []
             plugin.autoSaved = ({ layer: "", since: 0, devs: {} })
             cfg.windowMinutes = 60; plugin.reloadWindow()
@@ -1117,6 +1117,70 @@ ApplicationWindow {
                   L.ap2._exprReads.length === 2 && L.ap2._exprReads[1].indexOf('AND "fix_time" < to_datetime(') > 0
                   && plugin.autoSaved.since < L.since60 && L.ap2._committed.length === L.n180 + 1,
                   JSON.stringify(L.ap2._exprReads) + " " + L.ap2._committed.length)
+            // ── QFieldCloud syncing: reading, choosing and writing wait; the layer is read again after ──
+            L.sec = function(iso) { return Math.floor(new Date(String(iso)).getTime() / 1000) }
+            L.marked = function(iso) { return !!(plugin.autoSaved.devs["1"] || {})[L.sec(iso)] }
+            L.newest = function() { var tr = plugin.tracks["1"]; return tr[tr.length - 1].fixTime }
+            L.n2 = L.ap2._committed.length
+            cloud.state = 1
+            httpGet("/test/addfix?dev=1")
+            sleep(300)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("auto-save queued while syncing", function() { return plugin.writeQueue.length > 0 })
+        },
+        function() {
+            L.newIso = L.newest()
+            L.reads = L.ap2._exprReads.length
+            check("syncing: auto-save waits — nothing read, written or counted as saved",
+                  L.ap2._committed.length === L.n2 && !L.marked(L.newIso) && L.ap2._exprReads.length === 2,
+                  L.ap2._committed.length + " " + L.ap2._exprReads.length)
+            // the sync brings in that same fix, saved on another phone
+            var synced = L.newIso
+            L.ap2._committed.push({ id: 9998, geometry: { wkt: "Point (-6.31 53.365)" },
+                                    attribute: function(n) { return n === "device_id" ? 1 : n === "fix_time" ? synced : null } })
+            cloud.state = 0
+            waitFor("queue runs after the sync", function() { return plugin.writeQueue.length === 0 }, 6000)
+        },
+        function() {
+            var same = L.ap2._committed.filter(function(f) {
+                return f.attribute("device_id") === 1 && L.sec(f.attribute("fix_time")) === L.sec(L.newIso) })
+            check("after the sync the layer is read again: a fix the sync brought in isn't saved twice",
+                  L.ap2._exprReads.length > L.reads && same.length === 1 && L.ap2._committed.length === L.n2 + 1
+                  && L.marked(L.newIso), same.length + " " + L.ap2._committed.length + "/" + (L.n2 + 1))
+            // ── a write the layer refuses isn't counted as saved ──
+            L.n3 = L.ap2._committed.length
+            L.origCommit = L.ap2.commitChanges
+            L.ap2.commitChanges = function() { this._buffer = []; this._deleted = []; this._editing = false; return false }
+            httpGet("/test/addfix?dev=1")
+            sleep(300)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("the layer refuses the points", function() {
+                return toasts.some(function(t) { return t.indexOf("could not save the points") >= 0 }) })
+        },
+        function() {
+            L.newIso = L.newest()
+            check("a failed write: nothing saved, the fix not counted as saved",
+                  L.ap2._committed.length === L.n3 && !L.marked(L.newIso), L.ap2._committed.length)
+            L.ap2.commitChanges = L.origCommit
+            plugin.pollLive()                                   // no new fix this time
+            waitFor("retried on the next refresh", function() { return L.ap2._committed.length === L.n3 + 1 })
+        },
+        function() {
+            check("…so the next refresh saves it", L.ap2._committed.length === L.n3 + 1 && L.marked(L.newIso))
+            // ── a reloaded project (new layer object, e.g. after a sync download): read again ──
+            plugin.autoSaved.lyr = ({})
+            L.reads = L.ap2._exprReads.length
+            plugin.pollLive()
+            waitFor("read again after a reload", function() { return L.ap2._exprReads.length > L.reads })
+        },
+        function() {
+            check("a reloaded project: the layer is read again, nothing saved twice",
+                  L.ap2._exprReads.length === L.reads + 1 && L.ap2._committed.length === L.n3 + 1,
+                  L.ap2._exprReads.length + " " + L.ap2._committed.length)
             cfg.windowMinutes = L.keepWin
             var before = L.gfp._committed.length
             plugin.loadGeofences()

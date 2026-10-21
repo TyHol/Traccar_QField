@@ -146,8 +146,9 @@ Item {
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
     property var    pendingPoints: []     // points just sent: {key, name, lon, lat, confirmed} — drawn until a refresh
     property int    pendingSeq:   0
-    // Auto-save: the points layer; how far back its fixes were read (UTC ms); devId → {second: true} of them
-    property var    autoSaved:    ({ layer: "", since: 0, devs: {} })
+    // Auto-save: the points layer (name, object); how far back its fixes were read (UTC ms); devId → {second: true}
+    property var    autoSaved:    ({ layer: "", lyr: null, since: 0, devs: {} })
+    property bool   cloudWasBusy: false   // a QFieldCloud sync was seen: re-read the saved fixes before the next save
     property var    autoTrackUpto: ({})   // devId → newest fix (UTC ms) in its auto-saved track; {} = rewrite all
     property double autoTrackNext: 0      // auto-save: no track rewrite before this time (ms) — see _autoSave()
     property var    gfSaved:      ({})    // geofence id → its JSON when last saved
@@ -4244,7 +4245,9 @@ Item {
     // Positions: each shown device's fixes not in the layer yet (latest fix, or every fix) — so a wider
     // time window saves the earlier fixes too, and nothing is saved twice. Saved fixes are read once, in one
     // pass and only from the oldest fix that might be saved on (again for the earlier part when the window
-    // widens), so a long history in the layer doesn't slow it down.
+    // widens), so a long history in the layer doesn't slow it down. Reading, choosing and writing all wait
+    // for QFieldCloud like Save; after a sync (or a reloaded project) the layer is read again, as the sync
+    // may have brought in fixes saved elsewhere; a fix counts as saved only once the layer took it.
     // Tracks: after a full load (a new time window, Refresh) every shown track, after a Live update each
     // device with a newer fix — its track replaced by the window's; backing off for long tracks: after a
     // rewrite, the next waits at least 20x as long as it took (at most 10 min), so writing never takes
@@ -4252,50 +4255,17 @@ Item {
     function _autoSave() {
         if (!cfg.autoSave || plugin.win === null) return
         var hidden = _hiddenIds()
+        if (_cloudBusy()) plugin.cloudWasBusy = true
         if (cfg.pointsLayerName !== "") {
-            var lyr = _layerByNameQuiet(cfg.pointsLayerName)
-            if (plugin.autoSaved.layer !== cfg.pointsLayerName)
-                plugin.autoSaved = { layer: cfg.pointsLayerName, since: 0, devs: {} }
-            var memo = plugin.autoSaved, saved = memo.devs
             var maybe = []
             if (cfg.pointsMode === 1) {
                 for (var t in plugin.tracks) if (!hidden[t]) maybe = maybe.concat(plugin.tracks[t])
             } else {
                 for (var m in plugin.markerPos) if (!hidden[m]) maybe.push(plugin.markerPos[m])
             }
-            if (lyr && maybe.length > 0) {
-                var oldest = Math.min.apply(null, maybe.map(function(p) { return new Date(p.fixTime).getTime() }))
-                var since = oldest - savedReadMarginMs
-                if (memo.since === 0 || since < memo.since) {
-                    _readSavedFixes(lyr, since, memo.since, saved)
-                    memo.since = since
-                }
-            }
-            // Not in the layer yet (by device and fix time): a wider window saves the earlier fixes too
-            var positions = maybe.filter(function(p) {
-                var d = saved[String(p.deviceId)]
-                return !(d && d[_fixSecond(p)] === true)
-            })
-            positions.forEach(function(p) {
-                var k = String(p.deviceId)
-                if (!saved[k]) saved[k] = {}
-                saved[k][_fixSecond(p)] = true
-            })
-            if (positions.length > 0) {
-                var lookup = plugin.deviceInfo, tag = plugin.win.tag
-                _queueWrite(function() {
-                    var l2 = _layerByName(cfg.pointsLayerName, "Positions")
-                    if (!l2) return
-                    try {
-                        l2.startEditing()
-                        if (_writePointsToLayer(l2, positions, lookup, tag) === 0) throw "the layer did not accept the points"
-                        if (!l2.commitChanges()) throw "the layer could not save the points"
-                        l2.triggerRepaint()
-                    } catch(e) {
-                        try { l2.rollBack() } catch(e2) {}
-                        mainWindow.displayToast("Positions layer error: " + e)
-                    }
-                })
+            if (maybe.length > 0) {
+                var layerName = cfg.pointsLayerName, lookup = plugin.deviceInfo, tag = plugin.win.tag
+                _queueWrite(function() { _autoSavePoints(layerName, maybe, lookup, tag) })
             }
         }
         if (cfg.tracksLayerName !== "" && Date.now() >= plugin.autoTrackNext) {
@@ -4307,21 +4277,68 @@ Item {
                 if (hidden[k3] || arr.length === 0) continue
                 var last = new Date(arr[arr.length - 1].fixTime).getTime()
                 if (done[k3] === last) continue          // nothing newer since its last rewrite
-                byDev[k3] = arr; done[k3] = last; n++
+                byDev[k3] = last; n++
             }
-            plugin.autoTrackUpto = done
             if (n > 0) {
+                var tracks = {}
+                for (var k4 in byDev) tracks[k4] = plugin.tracks[k4]
                 var info = { fromIso: plugin.win.fromIso, toIso: plugin.win.toIso, lookup: plugin.deviceInfo,
                              tag: plugin.win.tag, replace: true }
                 plugin.autoTrackNext = Date.now() + 600000      // until this write has run and been timed
                 _queueWrite(function() {
                     var began = Date.now()
-                    _writeTracks(byDev, info)
+                    if (_writeTracks(tracks, info) > 0) {        // counts as saved only once the layer took it
+                        var upto = {}
+                        for (var u in plugin.autoTrackUpto) upto[u] = plugin.autoTrackUpto[u]
+                        for (var k5 in byDev) upto[k5] = byDev[k5]
+                        plugin.autoTrackUpto = upto
+                    }
                     plugin.autoTrackNext = Date.now() + Math.min(600000, 20 * (Date.now() - began))
                 })
             }
         }
         plugin.lastAutoSave = Qt.formatTime(new Date(), "HH:mm:ss")
+    }
+
+    // Auto-save, positions — runs from the write queue, so never during a QFieldCloud sync. Reads what's
+    // already in the layer (again after a sync or a reloaded project), writes the fixes not in it yet, and
+    // only then counts them as saved — a failed or cancelled write is tried again on the next refresh.
+    function _autoSavePoints(layerName, maybe, lookup, tag) {
+        var lyr = _layerByName(layerName, "Positions")
+        if (!lyr) return
+        var memo = plugin.autoSaved
+        if (memo.layer !== layerName || memo.lyr !== lyr || plugin.cloudWasBusy) {
+            memo = plugin.autoSaved = { layer: layerName, lyr: lyr, since: 0, devs: {} }
+            plugin.cloudWasBusy = false
+        }
+        var saved = memo.devs
+        var oldest = Math.min.apply(null, maybe.map(function(p) { return new Date(p.fixTime).getTime() }))
+        var since = oldest - savedReadMarginMs
+        if (memo.since === 0 || since < memo.since) {
+            _readSavedFixes(lyr, since, memo.since, saved)
+            memo.since = since
+        }
+        // Not in the layer yet (by device and fix time): a wider window saves the earlier fixes too
+        var positions = maybe.filter(function(p) {
+            var d = saved[String(p.deviceId)]
+            return !(d && d[_fixSecond(p)] === true)
+        })
+        if (positions.length === 0) return
+        try {
+            lyr.startEditing()
+            if (_writePointsToLayer(lyr, positions, lookup, tag) === 0) throw "the layer did not accept the points"
+            if (!lyr.commitChanges()) throw "the layer could not save the points"
+            lyr.triggerRepaint()
+        } catch(e) {
+            try { lyr.rollBack() } catch(e2) {}
+            mainWindow.displayToast("Positions layer error: " + e)
+            return
+        }
+        positions.forEach(function(p) {
+            var k = String(p.deviceId)
+            if (!saved[k]) saved[k] = {}
+            saved[k][_fixSecond(p)] = true
+        })
     }
 
     // A fix's time in whole seconds — what a layer's fix_time keeps
@@ -4524,6 +4541,7 @@ Item {
     function _drainWrites() {
         if (plugin.writeQueue.length === 0) { cloudWaitTimer.stop(); return }
         if (_cloudBusy()) {
+            plugin.cloudWasBusy = true                     // saved fixes are read again after it
             if (!cloudWaitTimer.running) {
                 plugin.writeWaitStart = Date.now()
                 cloudWaitTimer.start()
@@ -4531,6 +4549,7 @@ Item {
             } else if (Date.now() - plugin.writeWaitStart > 10 * 60000) {
                 cloudWaitTimer.stop()
                 plugin.writeQueue = []
+                plugin.autoTrackNext = 0                   // a cancelled track rewrite may be tried again
                 mainWindow.displayToast("Save cancelled — QFieldCloud still busy after 10 min")
             }
             return

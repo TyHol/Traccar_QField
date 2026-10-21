@@ -20,7 +20,11 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 - **Default names for points: a comma-separated list** (Settings → Connection), e.g. `Team 1, Team 2,
   Clue`. Adding a point offers them in a drop-down next to the name (the first is filled in, or the
   last name you sent); any other name can still be typed.
-- Tests: 149 checks.
+- **Auto-save and QFieldCloud**: reading what's already in the layer now waits for a sync too (before,
+  only writing did). After a sync or a reloaded project the layer is read again, so fixes the sync
+  brought in (saved on another phone, say) aren't saved twice. A fix counts as saved only once the layer
+  took it: a failed or cancelled save is tried again on the next refresh (a cancelled track rewrite too).
+- Tests: 154 checks.
 
 # v0.7.2 — Save geofences, safer sending, Live by default
 
