@@ -209,6 +209,17 @@ ApplicationWindow {
     }
     function localStr(d) { return Qt.formatDateTime(d, "yyyy-MM-dd HH:mm") }
     function devTrack(id) { return plugin.tracks[String(id)] || [] }
+    // The first item called n inside item (a popup: its contentItem), else null
+    function childByName(item, n) {
+        if (!item) return null
+        if (item.objectName === n) return item
+        var ch = item.children || []
+        for (var i = 0; i < ch.length; i++) {
+            var r = childByName(ch[i], n)
+            if (r) return r
+        }
+        return null
+    }
     function lastOf(lyr) { return lyr._committed[lyr._committed.length - 1] }
 
     // Visible items of a dialog that stick out past its content's left / right edge
@@ -393,6 +404,10 @@ ApplicationWindow {
                 plugin.openSettings(pages[i])
                 var o = opened()
                 check("Settings page '" + (pages[i] || "list") + "' opens", o.length >= 1 && o[0].page === pages[i])
+                if (pages[i] === "layers") {
+                    var sw = childByName(o[0].contentItem, "autoSaveSwitch")
+                    check("Layers: Automatic saving comes first", sw && sw.parent.children[1] === sw)
+                }
                 for (var k = 0; k < o.length; k++) o[k].close()
             }
             var res = plugin.resources
@@ -716,6 +731,7 @@ ApplicationWindow {
                   && gf("Base").kind === "circle", gf("Base").radius)
             // ── send a point (device) ──
             cfg.sendUrl = serverUrl + "/osmand/"
+            cfg.defaultNames = "Team 1, Team 2,, Clue "; cfg.lastSendName = ""
             plugin.startDraw("point")
             tap(-6.31, 53.362)
             sleep(200)
@@ -723,6 +739,13 @@ ApplicationWindow {
         function() {
             var d = sendDlg()
             check("Add → Point: one tap opens the name dialog", d && d.mode === "point")
+            var pick = childByName(d.contentItem, "sendNamePick")
+            check("default names (comma-separated) are the name drop-down; the first is filled in",
+                  pick && pick.visible && JSON.stringify(pick.model) === JSON.stringify(["Team 1", "Team 2", "Clue"])
+                  && d.nameText === "Team 1", pick ? JSON.stringify(pick.model) + " " + d.nameText : "no drop-down")
+            pick.activated(2)
+            check("…picking one fills the name (any other can still be typed)", d.nameText === "Clue")
+            cfg.defaultNames = ""
             d.nameText = "Clue 4"
             d.send()
             check("sent point shown at once: 'Clue 4 (sending…)' on the map",
@@ -1026,6 +1049,48 @@ ApplicationWindow {
         function() {
             check("…and the next refresh after the wait rewrites the track with everything since",
                   L.at._committed.length === L.nTracks)
+            // ── a wider time window: the earlier fixes are saved too (none twice); the track at once ──
+            L.ap2 = makeLayer("auto_pts2", 0, 1, [["device_id", "int"], ["name", "QString"], ["fix_time", "QString"]])
+            L.at2 = makeLayer("auto_trk2", 1, 2, [["device_id", "int"], ["name", "QString"], ["start_time", "QString"]])
+            L.keepWin = cfg.windowMinutes
+            cfg.pointsLayerName = "auto_pts2"; cfg.pointsMode = 1; cfg.tracksLayerName = "auto_trk2"
+            plugin.autoTrackUpto = ({}); plugin.autoTrackNext = 0
+            cfg.windowMinutes = 60; plugin.reloadWindow()
+            waitFor("60 min window", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            L.inWin = function() { var n = 0; for (var k in plugin.tracks) n += plugin.tracks[k].length; return n }
+            L.start1 = function() {
+                var f = L.at2._committed.filter(function(x) { return x.attribute("device_id") === 1 })
+                return f.length === 1 ? new Date(f[0].attribute("start_time")).getTime() : NaN
+            }
+            L.n60 = L.inWin(); L.s60 = L.start1()
+            check("every fix: the refresh saves each fix in the window", L.ap2._committed.length === L.n60 && L.n60 > 0,
+                  L.ap2._committed.length + "/" + L.n60)
+            plugin.autoTrackNext = 0
+            cfg.windowMinutes = 180; plugin.reloadWindow()
+            waitFor("180 min window", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            L.n180 = L.inWin()
+            check("a wider window: the earlier fixes are saved too, none twice",
+                  L.ap2._committed.length === L.n180 && L.n180 > L.n60, L.ap2._committed.length + "/" + L.n180 + " (" + L.n60 + ")")
+            check("…and each track is rewritten at once to start earlier (still one per device)",
+                  L.start1() < L.s60 && L.at2._committed.length === L.nTracks, L.start1() + " vs " + L.s60)
+            plugin.autoTrackNext = 0
+            cfg.windowMinutes = 60; plugin.reloadWindow()
+            waitFor("60 min again", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("a narrower window again: nothing saved twice", L.ap2._committed.length === L.n180, L.ap2._committed.length)
+            plugin.autoSaved = ({ layer: "", devs: {} })        // as after a restart
+            cfg.windowMinutes = 180; plugin.reloadWindow()
+            waitFor("180 min after a restart", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("…not even after a restart (what's in the layer is read first)", L.ap2._committed.length === L.n180,
+                  L.ap2._committed.length)
+            cfg.windowMinutes = L.keepWin
             var before = L.gfp._committed.length
             plugin.loadGeofences()
             sleep(500)

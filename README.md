@@ -73,7 +73,7 @@ Each device in the list shows how many fixes it has in the window and their time
 | | *Keep only the most recent track* | replaces that device's earlier track (matched by `device_id`, or by the device-name field if there is no `device_id`) |
 | Save (Geofences tab) | *Geofences*: a polygon layer and a line layer | areas and circles (as polygons) / lines, with `geofence_id`, name, description, type, radius, speed limit, colour, calendar; saving again replaces each one by `geofence_id` |
 
-**Save automatically** (Settings → Layers) saves after every refresh and Live update — only what's new: each device's new fixes, its track kept to the most recent one, and geofences that changed. It waits for QFieldCloud syncs like Save. `traccar_template.gpkg` now has all four layers.
+**Save automatically** (Settings → Layers) saves after every refresh and Live update — only what's new: each device's fixes not yet in the layer (latest or every fix; a wider time window saves the earlier ones too, and nothing is saved twice), its track kept to the most recent one, and geofences that changed. It waits for QFieldCloud syncs like Save. `traccar_template.gpkg` now has all four layers.
 
 Tracks carry altitude as Z and the fix time as M when the layer has them; plain 2D layers work too.
 
@@ -107,8 +107,8 @@ Settings are a list of short pages; changes apply immediately.
 
 | Page | Contains |
 |---|---|
-| **Connection** | Server URL, email / username, password, *Test connection*, *Send points to* (Traccar's OsmAnd address; blank = port 5055 on the server) |
-| **Layers** | Positions layer, device-name field, latest / every fix · Tracks layer, device-name field, add / keep most recent · Geofences: polygon and line layers · *Save after every refresh* |
+| **Connection** | Server URL, email / username, password, *Test connection*, *Send points to* (Traccar's OsmAnd address; blank = port 5055 on the server), *Default names for points* (comma-separated, offered in a drop-down) |
+| **Layers** | *Save after every refresh* · Positions layer, device-name field, latest / every fix · Tracks layer, device-name field, add / keep most recent · Geofences: polygon and line layers |
 | **Incident** | The layer and fields used by *From feature* · Tag: on/off, tag text, field, use the feature's display value |
 | **Advanced** | Map button, GPS accuracy circles, location format (lat/long, degrees + minutes, Irish Grid, UK Grid, project CRS), refresh interval, grey-marker limit |
 

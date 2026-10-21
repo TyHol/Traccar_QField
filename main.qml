@@ -74,6 +74,7 @@ Item {
         property int    circleRadius:    500    // metres, for circles and points sent as geofences
         property string sendUrl:         ""     // OsmAnd endpoint for points; blank = http://<server host>:5055
         property string lastSendName:    ""     // name offered first when sending a point
+        property string defaultNames:    ""     // names in the Send point drop-down: "Team 1, Team 2, …"
         property string deviceDetailsHidden:   ""   // detail lines left out of the device list ("speed,battery")
         property string geofenceDetailsHidden: ""   // … and of the geofence list
 
@@ -145,8 +146,8 @@ Item {
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
     property var    pendingPoints: []     // points just sent: {key, name, lon, lat, confirmed} — drawn until a refresh
     property int    pendingSeq:   0
-    property var    autoUpto:     ({})    // devId → newest fix auto-saved (UTC ms)
-    property var    autoTrackUpto: ({})   // devId → newest fix in its auto-saved track
+    property var    autoSaved:    ({ layer: "", devs: {} })  // the points layer; devId → {second: true} of its fixes in it
+    property var    autoTrackUpto: ({})   // devId → {first, last} fix (UTC ms) of its auto-saved track
     property double autoTrackNext: 0      // auto-save: no track rewrite before this time (ms) — see _autoSave()
     property var    gfSaved:      ({})    // geofence id → its JSON when last saved
     property string lastAutoSave: ""
@@ -1318,6 +1319,12 @@ Item {
                 else     _send("POST", "/api/geofences", body, ok, bad)
             })
         }, function(msg) { mainWindow.displayToast("Sending geofences needs your Traccar login: " + msg) })
+    }
+
+    // "Team 1, Team 2,, Clue" → ["Team 1", "Team 2", "Clue"] (the default names for Send point)
+    function nameList(text) {
+        return String(text || "").split(",").map(function(n) { return n.trim() })
+                                 .filter(function(n) { return n !== "" })
     }
 
     // OsmAnd endpoint for points: Settings → Connection 'Send to', else http://<server host>:5055/
@@ -2522,7 +2529,7 @@ Item {
         // Filled in as it opens (onOpened waits for the opening animation)
         onAboutToShow: {
             sent = false
-            sendName.text = point ? cfg.lastSendName : ""
+            sendName.text = point ? (cfg.lastSendName || plugin.nameList(cfg.defaultNames)[0] || "") : ""
             sendRadius.value = cfg.circleRadius
             sendDescription.text = ""; sendSpeed.value = 0; sendCorridor.value = 0; sendCalendar.currentIndex = 0
             sendUid.text = ""; sendCategory.currentIndex = 0; sendGroup.currentIndex = 0
@@ -2600,11 +2607,26 @@ Item {
                             : sendDialog.coords.length + " corners"
                 }
                 Label { text: "Name" }
-                TextField {
-                    id: sendName
+                RowLayout {
                     Layout.fillWidth: true
-                    placeholderText: sendDialog.point ? "e.g. Team 2 or Clue 4" : "e.g. Sector A"
-                    onAccepted: sendDialog.send()
+                    spacing: 4
+                    TextField {
+                        id: sendName
+                        Layout.fillWidth: true
+                        placeholderText: sendDialog.point ? "e.g. Team 2 or Clue 4" : "e.g. Sector A"
+                        onAccepted: sendDialog.send()
+                    }
+                    // The default names (Settings → Connection): pick one, or type any other name
+                    ComboBox {
+                        id: sendNamePick
+                        objectName: "sendNamePick"
+                        visible: sendDialog.point && count > 0
+                        model: sendDialog.point ? plugin.nameList(cfg.defaultNames) : []
+                        displayText: ""
+                        currentIndex: -1
+                        Layout.preferredWidth: 56
+                        onActivated: function(index) { sendName.text = model[index]; currentIndex = -1 }
+                    }
                 }
                 Hint {
                     visible: sendDialog.point
@@ -2989,7 +3011,8 @@ Item {
                           "Save (Geofences tab) — Traccar's geofences to the geofence layers in Settings → Layers: " +
                           "areas and circles (as polygons) and lines; saving again replaces each one by geofence_id.\n" +
                           "Save automatically (Settings → Layers) — after every refresh and Live update, only what's " +
-                          "new: each device's new fixes, its track (the most recent one) and geofences that changed.\n" +
+                          "new: each device's fixes not yet in the layer (a wider time window saves the earlier ones " +
+                          "too), its track (the most recent one) and geofences that changed.\n" +
                           "If QFieldCloud is syncing, the save waits and runs when it finishes."
                 }
 
@@ -3096,6 +3119,7 @@ Item {
             }
             if (sessionTagField.text.trim() !== cfg.sessionTag) cfg.sessionTag = sessionTagField.text.trim()
             if (sendUrlField.text.trim() !== cfg.sendUrl) cfg.sendUrl = sendUrlField.text.trim()
+            if (defaultNamesField.text.trim() !== cfg.defaultNames) cfg.defaultNames = defaultNamesField.text.trim()
         }
 
         function loadControls() {
@@ -3104,6 +3128,7 @@ Item {
             passField.text       = cfg.password
             sessionTagField.text = cfg.sessionTag
             sendUrlField.text    = cfg.sendUrl
+            defaultNamesField.text = cfg.defaultNames
             if (page === "layers") {
                 populateLayers(ptLayerModel, Qgis.GeometryType.Point)
                 restoreSelection(pointsLayerCombo, ptLayerModel, cfg.pointsLayerName)
@@ -3270,6 +3295,17 @@ Item {
                         text: "Points (Add → Point) go to Traccar's OsmAnd port. Leave blank for port 5055 on the "
                               + "server above; fill it in if your server uses another port or address."
                     }
+                    Label { text: "Default names for points"; Layout.topMargin: 8 }
+                    TextField {
+                        id: defaultNamesField
+                        Layout.fillWidth: true
+                        placeholderText: "e.g. Team 1, Team 2, Clue"
+                        onEditingFinished: settingsDialog.commitText()
+                    }
+                    Hint {
+                        text: "Separated by commas. They are in the drop-down next to the name when you add a point; "
+                              + "any other name can still be typed."
+                    }
                 }
 
                 // ══ Layers ═════════════════════════════════════════════════
@@ -3278,6 +3314,22 @@ Item {
                     Layout.fillWidth: true
                     spacing: 4
 
+                    Label { text: "Automatic saving"; font.bold: true; font.pixelSize: 15 }
+                    Switch {
+                        objectName: "autoSaveSwitch"
+                        text:    "Save after every refresh and Live update"
+                        checked: cfg.autoSave
+                        onToggled: cfg.autoSave = checked
+                        Layout.fillWidth: true
+                    }
+                    Hint {
+                        text: "Only what's new: each device's fixes not yet in the layer (latest fix or every fix, as " +
+                              "below — a wider time window saves the earlier ones too) and its track, kept to the " +
+                              "most recent one; geofences that changed. Hidden devices are left out. Waits for " +
+                              "QFieldCloud syncs, like Save."
+                    }
+
+                    Item { height: 8 }
                     Label { text: "Positions"; font.bold: true; font.pixelSize: 15 }
                     Label { text: "Layer" }
                     PickCombo {
@@ -3368,19 +3420,6 @@ Item {
                               "each one (matched by geofence_id). Circles are saved as polygons."
                     }
 
-                    Item { height: 8 }
-                    Label { text: "Automatic saving"; font.bold: true; font.pixelSize: 15 }
-                    Switch {
-                        text:    "Save after every refresh and Live update"
-                        checked: cfg.autoSave
-                        onToggled: cfg.autoSave = checked
-                        Layout.fillWidth: true
-                    }
-                    Hint {
-                        text: "Only what's new: each device's new fixes (latest fix or every fix, as above) and its " +
-                              "track, kept to the most recent one; geofences that changed. Hidden devices are left " +
-                              "out. Waits for QFieldCloud syncs, like Save."
-                    }
 
                     Item { height: 6 }
                     Hint {
@@ -4198,21 +4237,23 @@ Item {
     }
 
     // After a refresh / Live update (Settings → Layers → Save automatically): what's new only.
-    // Positions: each shown device's fixes newer than the last saved one (latest fix, or every fix).
-    // Tracks: each device with new fixes, its track replaced — backing off for long tracks: after a
+    // Positions: each shown device's fixes not in the layer yet (latest fix, or every fix) — so a wider
+    // time window saves the earlier fixes too, and nothing is saved twice.
+    // Tracks: each device with a newer fix or whose track now starts earlier, its track replaced — backing off for long tracks: after a
     // rewrite, the next waits at least 20x as long as it took (at most 10 min), so writing never takes
     // more than about 5% of the time (a slow phone backs off further by itself). Quiet unless something fails.
     function _autoSave() {
         if (!cfg.autoSave || plugin.win === null) return
         var hidden = _hiddenIds()
-        var upto = {}
-        for (var u in plugin.autoUpto) upto[u] = plugin.autoUpto[u]
         if (cfg.pointsLayerName !== "") {
             var lyr = _layerByNameQuiet(cfg.pointsLayerName)
+            if (plugin.autoSaved.layer !== cfg.pointsLayerName) plugin.autoSaved = { layer: cfg.pointsLayerName, devs: {} }
+            var saved = plugin.autoSaved.devs
+            // Not in the layer yet (by device and fix time): a wider window saves the earlier fixes too
             var newer = function(p) {
                 var k = String(p.deviceId)
-                if (upto[k] === undefined) upto[k] = lyr ? _newestSaved(lyr, k) : 0
-                return new Date(p.fixTime).getTime() > upto[k]
+                if (saved[k] === undefined) saved[k] = lyr ? _savedFixTimes(lyr, k) : {}
+                return saved[k][_fixSecond(p)] !== true
             }
             var positions = []
             if (cfg.pointsMode === 1) {
@@ -4220,11 +4261,7 @@ Item {
             } else {
                 for (var m in plugin.markerPos) if (!hidden[m] && newer(plugin.markerPos[m])) positions.push(plugin.markerPos[m])
             }
-            positions.forEach(function(p) {
-                var k = String(p.deviceId)
-                upto[k] = Math.max(upto[k] || 0, new Date(p.fixTime).getTime())
-            })
-            plugin.autoUpto = upto
+            positions.forEach(function(p) { saved[String(p.deviceId)][_fixSecond(p)] = true })
             if (positions.length > 0) {
                 var lookup = plugin.deviceInfo, tag = plugin.win.tag
                 _queueWrite(function() {
@@ -4249,9 +4286,10 @@ Item {
             for (var k3 in plugin.tracks) {
                 var arr = plugin.tracks[k3]
                 if (hidden[k3] || arr.length === 0) continue
-                var last = new Date(arr[arr.length - 1].fixTime).getTime()
-                if (done[k3] === last) continue
-                byDev[k3] = arr; done[k3] = last; n++
+                // Rewritten when it has a newer fix, or starts earlier (a wider time window)
+                var first = new Date(arr[0].fixTime).getTime(), last = new Date(arr[arr.length - 1].fixTime).getTime()
+                if (done[k3] && done[k3].last === last && first >= done[k3].first) continue
+                byDev[k3] = arr; done[k3] = { first: first, last: last }; n++
             }
             plugin.autoTrackUpto = done
             if (n > 0) {
@@ -4268,22 +4306,25 @@ Item {
         plugin.lastAutoSave = Qt.formatTime(new Date(), "HH:mm:ss")
     }
 
-    // The newest fix_time (UTC ms) of this device already in the layer; 0 if none / no such fields
-    function _newestSaved(lyr, devKey) {
+    // A fix's time in whole seconds — what a layer's fix_time keeps
+    function _fixSecond(p) { return Math.floor(new Date(p.fixTime).getTime() / 1000) }
+
+    // This device's fix times already in the layer, as {second: true}; none if no such fields
+    function _savedFixTimes(lyr, devKey) {
         var names = lyr.fields.names
-        if (names.indexOf("device_id") < 0 || names.indexOf("fix_time") < 0) return 0
-        var best = 0
+        var out = {}
+        if (names.indexOf("device_id") < 0 || names.indexOf("fix_time") < 0) return out
         try {
             var iter = LayerUtils.createFeatureIterator(lyr)
             while (iter.hasNext()) {
                 var f = iter.next()
                 if (String(f.attribute("device_id")) !== devKey) continue
                 var iso = _attrToIsoUtc(f.attribute("fix_time"))
-                if (iso !== "") best = Math.max(best, new Date(iso).getTime())
+                if (iso !== "") out[Math.floor(new Date(iso).getTime() / 1000)] = true
             }
             iter.close()
         } catch(e) {}
-        return best
+        return out
     }
 
     function _layerByNameQuiet(name) {
