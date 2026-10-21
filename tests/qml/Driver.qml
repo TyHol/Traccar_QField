@@ -1181,6 +1181,83 @@ ApplicationWindow {
             check("a reloaded project: the layer is read again, nothing saved twice",
                   L.ap2._exprReads.length === L.reads + 1 && L.ap2._committed.length === L.n3 + 1,
                   L.ap2._exprReads.length + " " + L.ap2._committed.length)
+            // ── out of coverage: a device a load can't get keeps its track ──
+            L.n1 = plugin.tracks["1"].length
+            httpGet("/test/down?route=1&devices=1")
+            sleep(200)
+        },
+        function() {
+            plugin.reloadWindow()
+            waitFor("load with Phone A failing", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("a device a load couldn't get keeps its track (within the window)",
+                  (plugin.tracks["1"] || []).length === L.n1 && plugin.catchUp !== null
+                  && JSON.stringify(plugin.catchUp.ids) === '["1"]', (plugin.tracks["1"] || []).length + "/" + L.n1
+                  + " " + JSON.stringify(plugin.catchUp))
+            httpGet("/test/down")
+            sleep(200)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("caught up", function() { return plugin.catchUp === null })
+        },
+        function() {
+            check("…and the next Live update gets it again", plugin.tracks["1"].length >= L.n1)
+            httpGet("/test/down?all=1")
+            sleep(200)
+        },
+        function() {
+            plugin.reloadWindow()
+            waitFor("offline Refresh", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("offline Refresh: the map keeps what it showed; the load is tried again",
+                  (plugin.tracks["1"] || []).length >= L.n1 && plugin.win !== null && plugin.reloadPending)
+            httpGet("/test/down")
+            sleep(200)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("back online: window loaded", function() { return !plugin.reloadPending && !plugin.loading }, 15000)
+        },
+        function() {
+            check("…back online: the next Live update loads the window", !plugin.reloadPending && plugin.win !== null)
+            // ── missed Live updates: the gap is fetched with the next good one, and auto-saved ──
+            L.goodTo = new Date(plugin.win.toIso).getTime()
+            L.nb = plugin.tracks["1"].length
+            L.nSaved = L.ap2._committed.length
+            httpGet("/test/down?all=1")
+            sleep(200)
+        },
+        function() {
+            plugin.pollLive()
+            waitFor("failed Live update", function() { return plugin.catchUp !== null })
+        },
+        function() {
+            check("a failed Live update: the map keeps its tracks, the gap is noted",
+                  plugin.tracks["1"].length === L.nb && plugin.catchUp.ids === null && plugin.catchUp.fromMs <= L.goodTo,
+                  JSON.stringify(plugin.catchUp))
+            sleep(1600)
+        },
+        function() { httpGet("/test/addfix?dev=1"); sleep(1100) },     // fixes reaching Traccar while we're offline
+        function() { httpGet("/test/addfix?dev=1"); sleep(1100) },
+        function() { httpGet("/test/addfix?dev=1"); sleep(200) },
+        function() { httpGet("/test/down"); sleep(200) },
+        function() {
+            plugin.pollLive()
+            waitFor("gap fetched", function() { return plugin.catchUp === null && plugin.tracks["1"].length === L.nb + 3 })
+        },
+        function() {
+            var tr = plugin.tracks["1"]
+            var sorted = tr.every(function(p, i) { return i === 0 || new Date(tr[i - 1].fixTime) < new Date(p.fixTime) })
+            check("back in coverage: the next Live update fetches the whole gap, not just the latest fix",
+                  tr.length === L.nb + 3 && sorted, tr.length + "/" + (L.nb + 3))
+            waitFor("gap auto-saved", function() { return L.ap2._committed.length === L.nSaved + 3 })
+        },
+        function() {
+            check("…and auto-save saves the gap: every fix once", L.ap2._committed.length === L.nSaved + 3,
+                  L.ap2._committed.length + "/" + (L.nSaved + 3))
             cfg.windowMinutes = L.keepWin
             var before = L.gfp._committed.length
             plugin.loadGeofences()

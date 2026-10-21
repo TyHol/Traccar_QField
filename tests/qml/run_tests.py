@@ -79,6 +79,7 @@ GEOFENCES = [   # one made in Traccar (own colour), one sent from QGIS before
 ]
 OSMAND = []     # fixes received on the OsmAnd port
 CALLS = {"route": 0, "per_device": 0}           # how the plugin asked for a window's fixes
+DOWN = {"all": False, "route": False, "devices": set()}   # out of coverage: every / the route / these devices' requests fail
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -153,6 +154,13 @@ class Handler(BaseHTTPRequestHandler):
             OSMAND.append(q)
             POS[d["id"]].append(_fix(d["id"], t, float(q["lon"][0]), float(q["lat"][0]), len(POS[d["id"]])))
             return self._send(200)
+        if u.path == "/test/down":                      # test hook: ?all=1 / ?route=1&devices=1,2 — none: back up
+            DOWN.update(all="all" in q, route="route" in q,
+                        devices={int(x) for x in q.get("devices", [""])[0].split(",") if x})
+            return self._send(200, {})
+        if u.path.startswith("/api/") and (DOWN["all"] or (DOWN["route"] and u.path == "/api/reports/route") or (
+                u.path == "/api/positions" and "deviceId" in q and int(q["deviceId"][0]) in DOWN["devices"])):
+            return self._send(503)
         if u.path == "/test/state":                     # test hook: what the server holds now
             return self._send(200, {"geofences": GEOFENCES, "devices": DEVICES, "osmand": len(OSMAND), "calls": CALLS})
         if u.path == "/test/addfix":                    # test hook: a new live fix

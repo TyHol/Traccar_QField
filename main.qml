@@ -135,6 +135,11 @@ Item {
     property bool   loading:      false
     property double loadStarted:  0
     property int    loadGen:      0       // bumped by every load; late replies from older loads are ignored
+    property var    prevWin:      null    // {win, tracks, latest} before a reload: shown again if it fails
+    property bool   reloadPending: false  // a full load failed: Live tries it again instead of an update
+    property var    catchUp:      null    // {fromMs, ids (null = all)}: fixes missed (failed Live updates, devices
+                                          // a load couldn't get) — fetched by the next good Live update
+    property bool   catchingUp:   false
     property string lastFetched:  ""
     property string liveError:    ""
     property string statusMsg:    ""      // window / loading hint under the time window
@@ -1029,6 +1034,7 @@ Item {
     readonly property string sentPointPrefix: "qgis-"
     readonly property int    maxAreaChars:    4000      // Traccar keeps the area in a 4096-character column
     readonly property int    routeBatch:      50        // devices per route-report request when loading a window
+    readonly property double catchUpMarginMs: 5 * 60000 // after missed Live updates, fetch from this long before the last good one
     readonly property double savedReadMarginMs: 14 * 3600000  // auto-save reads saved fixes from this long before the
                                                               // oldest it might save (covers local-time fix_times)
     readonly property var    deviceCategories: ["default", "animal", "bicycle", "boat", "bus", "camper", "car",
@@ -3690,6 +3696,7 @@ Item {
     }
 
     function reloadWindow() {
+        if (plugin.win !== null) plugin.prevWin = { win: plugin.win, tracks: plugin.tracks, latest: plugin.latest }
         clearWindow()
         loadWindow(true)
     }
@@ -3711,6 +3718,12 @@ Item {
             plugin.loading   = false
             plugin.statusMsg = ""
             plugin.liveError = msg
+            plugin.reloadPending = true                 // Live tries the load again
+            if (plugin.win === null && plugin.prevWin) {
+                // Offline, say: show what was there before instead of an empty map
+                plugin.win = plugin.prevWin.win; plugin.tracks = plugin.prevWin.tracks; plugin.latest = plugin.prevWin.latest
+                _rebuildAll()
+            }
         }
 
         _get("/api/devices", function(devData) {
@@ -3722,59 +3735,40 @@ Item {
             _get("/api/positions", function(posData) {
                 var latest = {}
                 posData.forEach(function(p) { if (_valid(p)) latest[String(p.deviceId)] = p })
-                var ids     = Object.keys(lookup)
-                var byDev   = {}
-                var failed  = 0
-                var pending = ids.length
-                var done = function() {
-                    if (--pending > 0) return
+                if (gen !== plugin.loadGen) return
+                _fetchFixes(Object.keys(lookup), w.fromIso, w.toIso, function(byDev, failed) {
                     if (gen !== plugin.loadGen) return      // superseded by a newer load
+                    // A device that couldn't be loaded keeps the fixes it had, within the new window
+                    var before = {}, k
+                    if (plugin.prevWin) for (k in plugin.prevWin.tracks) before[k] = plugin.prevWin.tracks[k]
+                    for (k in plugin.tracks) before[k] = plugin.tracks[k]
+                    var fromMs = new Date(w.fromIso).getTime(), toMs = new Date(w.toIso).getTime()
+                    failed.forEach(function(d) {
+                        var kept = (before[d] || []).filter(function(p) {
+                            var ms = new Date(p.fixTime).getTime()
+                            return ms >= fromMs && ms <= toMs
+                        })
+                        if (kept.length > 0) byDev[d] = kept
+                    })
                     plugin.loading     = false
-                    plugin.liveError   = failed > 0 ? failed + " device(s) could not be loaded" : ""
+                    plugin.liveError   = failed.length > 0
+                                         ? failed.length + " device(s) could not be loaded — Live (or Refresh) tries them again" : ""
                     plugin.statusMsg   = ""
                     plugin.win         = w
                     plugin.tracks      = byDev
                     plugin.latest      = latest
+                    plugin.prevWin     = null
+                    plugin.reloadPending = false
+                    plugin.catchUp     = failed.length > 0 ? { fromMs: fromMs, ids: failed } : null
                     plugin.lastFetched = Qt.formatTime(new Date(), "HH:mm:ss")
                     _rebuildAll()
                     _settlePending(started)
-                    plugin.autoTrackUpto = ({})            // a new window / Refresh: rewrite every track
+                    // a new window / Refresh: rewrite every track (but not one kept from before)
+                    var upto = {}
+                    failed.forEach(function(d) { if (plugin.autoTrackUpto[d] !== undefined) upto[d] = plugin.autoTrackUpto[d] })
+                    plugin.autoTrackUpto = upto
                     _autoSave()
-                }
-                if (pending === 0) { pending = 1; done(); return }
-                var range = "&from=" + encodeURIComponent(w.fromIso) + "&to=" + encodeURIComponent(w.toIso)
-                var perDevice = function(batch) {          // fallback: servers that refuse the route report
-                    batch.forEach(function(devId) {
-                        _get("/api/positions?deviceId=" + devId + range,
-                            function(hist) {
-                                var valid = hist.filter(_valid)
-                                valid.sort(_byFixTime)
-                                if (valid.length > 0) byDev[String(devId)] = valid
-                                done()
-                            },
-                            function(msg) { failed++; done() })
-                    })
-                }
-                // One route report per batch of devices instead of one request per device
-                for (var b = 0; b < ids.length; b += routeBatch) {
-                    (function(batch) {
-                        _get("/api/reports/route?" + batch.map(function(d) { return "deviceId=" + d }).join("&") + range,
-                            function(rows) {
-                                (rows || []).forEach(function(p) {
-                                    if (!_valid(p)) return
-                                    var k = String(p.deviceId)
-                                    if (batch.indexOf(k) < 0) return
-                                    if (!byDev[k]) byDev[k] = []
-                                    byDev[k].push(p)
-                                })
-                                batch.forEach(function(k) {
-                                    if (byDev[k]) byDev[k].sort(_byFixTime)
-                                    done()
-                                })
-                            },
-                            function(msg) { perDevice(batch) })
-                    })(ids.slice(b, b + routeBatch))
-                }
+                })
             }, onErr)
         }, function(msg) {
             if (msg.indexOf("401") >= 0) plugin.connState = "wrong username or password"
@@ -3782,16 +3776,102 @@ Item {
         })
     }
 
-    // Live refresh: add each device's new fix to its track and move the window on
+    // Every fix of these devices (id strings) from fromIso to toIso: one route report per batch of devices,
+    // or one request per device where the server refuses it. done(byDev, failedIds) once all replied.
+    function _fetchFixes(ids, fromIso, toIso, done) {
+        var byDev = {}, failed = []
+        var pending = ids.length
+        var one = function() { if (--pending === 0) done(byDev, failed) }
+        if (pending === 0) { done(byDev, failed); return }
+        var range = "&from=" + encodeURIComponent(fromIso) + "&to=" + encodeURIComponent(toIso)
+        var perDevice = function(batch) {          // fallback: servers that refuse the route report
+            batch.forEach(function(devId) {
+                _get("/api/positions?deviceId=" + devId + range,
+                    function(hist) {
+                        var valid = hist.filter(_valid)
+                        valid.sort(_byFixTime)
+                        if (valid.length > 0) byDev[String(devId)] = valid
+                        one()
+                    },
+                    function(msg) { failed.push(String(devId)); one() })
+            })
+        }
+        // One route report per batch of devices instead of one request per device
+        for (var b = 0; b < ids.length; b += routeBatch) {
+            (function(batch) {
+                _get("/api/reports/route?" + batch.map(function(d) { return "deviceId=" + d }).join("&") + range,
+                    function(rows) {
+                        (rows || []).forEach(function(p) {
+                            if (!_valid(p)) return
+                            var k = String(p.deviceId)
+                            if (batch.indexOf(k) < 0) return
+                            if (!byDev[k]) byDev[k] = []
+                            byDev[k].push(p)
+                        })
+                        batch.forEach(function(k) {
+                            if (byDev[k]) byDev[k].sort(_byFixTime)
+                            one()
+                        })
+                    },
+                    function(msg) { perDevice(batch) })
+            })(ids.slice(b, b + routeBatch).map(String))
+        }
+    }
+
+    // After missed Live updates (out of coverage, say) or devices a load couldn't get: fetch their fixes
+    // since then and merge them in, so the map and auto-save get the gap without a Refresh.
+    function _runCatchUp() {
+        var cu = plugin.catchUp, w = plugin.win, gen = plugin.loadGen
+        if (cu === null || w === null || plugin.catchingUp) return
+        var ids = Object.keys(plugin.deviceInfo).filter(function(d) { return cu.ids === null || cu.ids.indexOf(d) >= 0 })
+        var now = Date.now()
+        var endMs = w.endLimitIso !== "" ? new Date(w.endLimitIso).getTime() : Infinity
+        var fromMs = Math.max(cu.fromMs, new Date(w.fromIso).getTime())
+        plugin.catchingUp = true
+        _fetchFixes(ids, new Date(fromMs).toISOString(), new Date(Math.min(now, endMs)).toISOString(), function(byDev, failed) {
+            plugin.catchingUp = false
+            if (gen !== plugin.loadGen || plugin.win === null) return     // a new window was loaded meanwhile
+            var w2 = plugin.win
+            var lo = new Date(w2.fromIso).getTime(), hi = w2.endLimitIso !== "" ? new Date(w2.endLimitIso).getTime() : Infinity
+            var t = {}, upto = {}, k
+            for (k in plugin.tracks) t[k] = plugin.tracks[k]
+            for (k in plugin.autoTrackUpto) upto[k] = plugin.autoTrackUpto[k]
+            for (k in byDev) {
+                var merged = {}
+                ;(t[k] || []).forEach(function(p) { merged[new Date(p.fixTime).getTime()] = p })
+                byDev[k].forEach(function(p) {
+                    var ms = new Date(p.fixTime).getTime()
+                    if (ms >= lo && ms <= hi && merged[ms] === undefined) merged[ms] = p
+                })
+                t[k] = Object.keys(merged).map(function(ms) { return merged[ms] }).sort(_byFixTime)
+                delete upto[k]                               // fixes in the middle: rewrite its track
+            }
+            plugin.tracks = t
+            plugin.autoTrackUpto = upto
+            if (plugin.catchUp === cu)                       // (a newer gap, if any, already covers this one)
+                plugin.catchUp = failed.length > 0 ? { fromMs: cu.fromMs, ids: failed } : null
+            _rebuildAll()
+            _autoSave()
+        })
+    }
+
+    // Live refresh: add each device's new fix to its track and move the window on; fetch any gap left by
+    // missed updates. A full load that failed is tried again instead.
     function pollLive() {
         if (plugin.loading) return
-        if (plugin.win === null) { loadWindow(); return }
+        if (plugin.win === null || plugin.reloadPending) { loadWindow(); return }
         if (!plugin.win.moving) return
 
         var gen   = plugin.loadGen
         var started = Date.now()
         var stale = function() { return gen !== plugin.loadGen || plugin.loading || plugin.win === null }
-        var onErr = function(msg) { if (!stale()) plugin.liveError = msg }
+        var onErr = function(msg) {
+            if (stale()) return
+            plugin.liveError = msg
+            // missed: fetch from the last good update next time
+            var from = new Date(plugin.win.toIso).getTime() - catchUpMarginMs
+            plugin.catchUp = { fromMs: plugin.catchUp ? Math.min(from, plugin.catchUp.fromMs) : from, ids: null }
+        }
         _get("/api/devices", function(devData) {
             if (stale()) return
             plugin.deviceInfo = _lookupFromDevices(devData)
@@ -3834,6 +3914,7 @@ Item {
                 _rebuildAll()
                 _settlePending(started)
                 _autoSave()
+                if (plugin.catchUp !== null) _runCatchUp()
             }, onErr)
         }, onErr)
     }

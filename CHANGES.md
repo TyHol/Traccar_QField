@@ -24,7 +24,13 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
   only writing did). After a sync or a reloaded project the layer is read again, so fixes the sync
   brought in (saved on another phone, say) aren't saved twice. A fix counts as saved only once the layer
   took it: a failed or cancelled save is tried again on the next refresh (a cancelled track rewrite too).
-- Tests: 154 checks.
+- **In and out of coverage.** A Live update that fails keeps the map as it is (as before), and the next
+  one that gets through now also fetches everything the devices sent in between — on the map and to
+  auto-save — instead of only each device's latest fix, which left a gap until Refresh.
+- **A load that fails keeps what was there.** A Refresh or new time window while offline shows the
+  previous window again (not an empty map), and Live tries the load again. A device whose part of a load
+  fails keeps its track (the part inside the window) and is fetched again with the next Live update.
+- Tests: 161 checks.
 
 # v0.7.2 — Save geofences, safer sending, Live by default
 
