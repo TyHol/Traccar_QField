@@ -1077,12 +1077,15 @@ ApplicationWindow {
                   L.ap2._committed.length === L.n180 && L.n180 > L.n60, L.ap2._committed.length + "/" + L.n180 + " (" + L.n60 + ")")
             check("…and each track is rewritten at once to start earlier (still one per device)",
                   L.start1() < L.s60 && L.at2._committed.length === L.nTracks, L.start1() + " vs " + L.s60)
+            L.s180 = L.start1()
             plugin.autoTrackNext = 0
             cfg.windowMinutes = 60; plugin.reloadWindow()
             waitFor("60 min again", function() { return !plugin.loading }, 15000)
         },
         function() {
             check("a narrower window again: nothing saved twice", L.ap2._committed.length === L.n180, L.ap2._committed.length)
+            check("…and the tracks are rewritten at once to the shorter window (no new fix needed)",
+                  L.start1() > L.s180 && L.at2._committed.length === L.nTracks, L.start1() + " vs " + L.s180)
             plugin.autoSaved = ({ layer: "", devs: {} })        // as after a restart
             cfg.windowMinutes = 180; plugin.reloadWindow()
             waitFor("180 min after a restart", function() { return !plugin.loading }, 15000)
@@ -1090,6 +1093,30 @@ ApplicationWindow {
         function() {
             check("…not even after a restart (what's in the layer is read first)", L.ap2._committed.length === L.n180,
                   L.ap2._committed.length)
+            // ── only the saved fixes that could come up again are read, in one pass ──
+            L.oldIso = new Date(Date.now() - 30 * 86400000).toISOString()
+            L.ap2._committed.push({ id: 9999, geometry: { wkt: "Point (-6.3 53.3)" },
+                                    attribute: function(n) { return n === "device_id" ? 1 : n === "fix_time" ? L.oldIso : null } })
+            L.ap2._exprReads = []
+            plugin.autoSaved = ({ layer: "", since: 0, devs: {} })
+            cfg.windowMinutes = 60; plugin.reloadWindow()
+            waitFor("60 min, reading what's saved", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            var memo = plugin.autoSaved, sec = Math.floor(new Date(L.oldIso).getTime() / 1000)
+            check("saved fixes read in one pass, only from the window's start on (a month-old one isn't)",
+                  L.ap2._exprReads.length === 1 && L.ap2._exprReads[0].indexOf('"fix_time" >= to_datetime(') === 0
+                  && !(memo.devs["1"] && memo.devs["1"][sec]) && Object.keys(memo.devs["1"] || {}).length > 0,
+                  JSON.stringify(L.ap2._exprReads))
+            L.since60 = memo.since
+            cfg.windowMinutes = 180; plugin.reloadWindow()
+            waitFor("180 min, reading the earlier part", function() { return !plugin.loading }, 15000)
+        },
+        function() {
+            check("…a wider window reads just the earlier part, nothing saved twice",
+                  L.ap2._exprReads.length === 2 && L.ap2._exprReads[1].indexOf('AND "fix_time" < to_datetime(') > 0
+                  && plugin.autoSaved.since < L.since60 && L.ap2._committed.length === L.n180 + 1,
+                  JSON.stringify(L.ap2._exprReads) + " " + L.ap2._committed.length)
             cfg.windowMinutes = L.keepWin
             var before = L.gfp._committed.length
             plugin.loadGeofences()

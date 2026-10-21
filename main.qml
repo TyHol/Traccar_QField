@@ -146,8 +146,9 @@ Item {
     property var    drawPts:      []      // corners tapped so far, {lon, lat}
     property var    pendingPoints: []     // points just sent: {key, name, lon, lat, confirmed} — drawn until a refresh
     property int    pendingSeq:   0
-    property var    autoSaved:    ({ layer: "", devs: {} })  // the points layer; devId → {second: true} of its fixes in it
-    property var    autoTrackUpto: ({})   // devId → {first, last} fix (UTC ms) of its auto-saved track
+    // Auto-save: the points layer; how far back its fixes were read (UTC ms); devId → {second: true} of them
+    property var    autoSaved:    ({ layer: "", since: 0, devs: {} })
+    property var    autoTrackUpto: ({})   // devId → newest fix (UTC ms) in its auto-saved track; {} = rewrite all
     property double autoTrackNext: 0      // auto-save: no track rewrite before this time (ms) — see _autoSave()
     property var    gfSaved:      ({})    // geofence id → its JSON when last saved
     property string lastAutoSave: ""
@@ -1027,6 +1028,8 @@ Item {
     readonly property string sentPointPrefix: "qgis-"
     readonly property int    maxAreaChars:    4000      // Traccar keeps the area in a 4096-character column
     readonly property int    routeBatch:      50        // devices per route-report request when loading a window
+    readonly property double savedReadMarginMs: 14 * 3600000  // auto-save reads saved fixes from this long before the
+                                                              // oldest it might save (covers local-time fix_times)
     readonly property var    deviceCategories: ["default", "animal", "bicycle", "boat", "bus", "camper", "car",
         "crane", "helicopter", "motorcycle", "offroad", "person", "pickup", "plane", "scooter", "ship",
         "tractor", "train", "tram", "trolleybus", "truck", "van"]       // Traccar's map icons
@@ -3734,6 +3737,7 @@ Item {
                     plugin.lastFetched = Qt.formatTime(new Date(), "HH:mm:ss")
                     _rebuildAll()
                     _settlePending(started)
+                    plugin.autoTrackUpto = ({})            // a new window / Refresh: rewrite every track
                     _autoSave()
                 }
                 if (pending === 0) { pending = 1; done(); return }
@@ -4238,8 +4242,11 @@ Item {
 
     // After a refresh / Live update (Settings → Layers → Save automatically): what's new only.
     // Positions: each shown device's fixes not in the layer yet (latest fix, or every fix) — so a wider
-    // time window saves the earlier fixes too, and nothing is saved twice.
-    // Tracks: each device with a newer fix or whose track now starts earlier, its track replaced — backing off for long tracks: after a
+    // time window saves the earlier fixes too, and nothing is saved twice. Saved fixes are read once, in one
+    // pass and only from the oldest fix that might be saved on (again for the earlier part when the window
+    // widens), so a long history in the layer doesn't slow it down.
+    // Tracks: after a full load (a new time window, Refresh) every shown track, after a Live update each
+    // device with a newer fix — its track replaced by the window's; backing off for long tracks: after a
     // rewrite, the next waits at least 20x as long as it took (at most 10 min), so writing never takes
     // more than about 5% of the time (a slow phone backs off further by itself). Quiet unless something fails.
     function _autoSave() {
@@ -4247,21 +4254,33 @@ Item {
         var hidden = _hiddenIds()
         if (cfg.pointsLayerName !== "") {
             var lyr = _layerByNameQuiet(cfg.pointsLayerName)
-            if (plugin.autoSaved.layer !== cfg.pointsLayerName) plugin.autoSaved = { layer: cfg.pointsLayerName, devs: {} }
-            var saved = plugin.autoSaved.devs
-            // Not in the layer yet (by device and fix time): a wider window saves the earlier fixes too
-            var newer = function(p) {
-                var k = String(p.deviceId)
-                if (saved[k] === undefined) saved[k] = lyr ? _savedFixTimes(lyr, k) : {}
-                return saved[k][_fixSecond(p)] !== true
-            }
-            var positions = []
+            if (plugin.autoSaved.layer !== cfg.pointsLayerName)
+                plugin.autoSaved = { layer: cfg.pointsLayerName, since: 0, devs: {} }
+            var memo = plugin.autoSaved, saved = memo.devs
+            var maybe = []
             if (cfg.pointsMode === 1) {
-                for (var t in plugin.tracks) if (!hidden[t]) positions = positions.concat(plugin.tracks[t].filter(newer))
+                for (var t in plugin.tracks) if (!hidden[t]) maybe = maybe.concat(plugin.tracks[t])
             } else {
-                for (var m in plugin.markerPos) if (!hidden[m] && newer(plugin.markerPos[m])) positions.push(plugin.markerPos[m])
+                for (var m in plugin.markerPos) if (!hidden[m]) maybe.push(plugin.markerPos[m])
             }
-            positions.forEach(function(p) { saved[String(p.deviceId)][_fixSecond(p)] = true })
+            if (lyr && maybe.length > 0) {
+                var oldest = Math.min.apply(null, maybe.map(function(p) { return new Date(p.fixTime).getTime() }))
+                var since = oldest - savedReadMarginMs
+                if (memo.since === 0 || since < memo.since) {
+                    _readSavedFixes(lyr, since, memo.since, saved)
+                    memo.since = since
+                }
+            }
+            // Not in the layer yet (by device and fix time): a wider window saves the earlier fixes too
+            var positions = maybe.filter(function(p) {
+                var d = saved[String(p.deviceId)]
+                return !(d && d[_fixSecond(p)] === true)
+            })
+            positions.forEach(function(p) {
+                var k = String(p.deviceId)
+                if (!saved[k]) saved[k] = {}
+                saved[k][_fixSecond(p)] = true
+            })
             if (positions.length > 0) {
                 var lookup = plugin.deviceInfo, tag = plugin.win.tag
                 _queueWrite(function() {
@@ -4286,10 +4305,9 @@ Item {
             for (var k3 in plugin.tracks) {
                 var arr = plugin.tracks[k3]
                 if (hidden[k3] || arr.length === 0) continue
-                // Rewritten when it has a newer fix, or starts earlier (a wider time window)
-                var first = new Date(arr[0].fixTime).getTime(), last = new Date(arr[arr.length - 1].fixTime).getTime()
-                if (done[k3] && done[k3].last === last && first >= done[k3].first) continue
-                byDev[k3] = arr; done[k3] = { first: first, last: last }; n++
+                var last = new Date(arr[arr.length - 1].fixTime).getTime()
+                if (done[k3] === last) continue          // nothing newer since its last rewrite
+                byDev[k3] = arr; done[k3] = last; n++
             }
             plugin.autoTrackUpto = done
             if (n > 0) {
@@ -4309,22 +4327,30 @@ Item {
     // A fix's time in whole seconds — what a layer's fix_time keeps
     function _fixSecond(p) { return Math.floor(new Date(p.fixTime).getTime() / 1000) }
 
-    // This device's fix times already in the layer, as {second: true}; none if no such fields
-    function _savedFixTimes(lyr, devKey) {
+    // The fix times already in the layer from since (UTC ms; up to until, if not 0), per device →
+    // out {devId: {second: true}}. One pass; the layer filters by time (older QField: filtered here).
+    // Nothing if the layer has no device_id / fix_time.
+    function _readSavedFixes(lyr, since, until, out) {
         var names = lyr.fields.names
-        var out = {}
-        if (names.indexOf("device_id") < 0 || names.indexOf("fix_time") < 0) return out
+        if (names.indexOf("device_id") < 0 || names.indexOf("fix_time") < 0) return
+        var lit = function(ms) { return "to_datetime('" + new Date(ms).toISOString() + "')" }
+        var expr = '"fix_time" >= ' + lit(since) + (until ? ' AND "fix_time" < ' + lit(until) : "")
         try {
-            var iter = LayerUtils.createFeatureIterator(lyr)
+            var filtered = typeof LayerUtils.createFeatureIteratorFromExpression === "function"
+            var iter = filtered ? LayerUtils.createFeatureIteratorFromExpression(lyr, expr)
+                                : LayerUtils.createFeatureIterator(lyr)
             while (iter.hasNext()) {
                 var f = iter.next()
-                if (String(f.attribute("device_id")) !== devKey) continue
-                var iso = _attrToIsoUtc(f.attribute("fix_time"))
-                if (iso !== "") out[Math.floor(new Date(iso).getTime() / 1000)] = true
+                var v = f.attribute("fix_time"), dev = f.attribute("device_id")
+                if (v === null || v === undefined || v === "" || dev === null || dev === undefined) continue
+                var ms = (v instanceof Date) ? v.getTime() : new Date(_attrToIsoUtc(v)).getTime()
+                if (isNaN(ms) || (!filtered && (ms < since || (until && ms >= until)))) continue
+                var k = String(dev)
+                if (!out[k]) out[k] = {}
+                out[k][Math.floor(ms / 1000)] = true
             }
             iter.close()
         } catch(e) {}
-        return out
     }
 
     function _layerByNameQuiet(name) {
