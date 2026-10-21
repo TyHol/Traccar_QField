@@ -14,20 +14,20 @@ A [QField](https://qfield.org) plugin that shows your [Traccar](https://www.trac
 - **QFieldCloud-safe** — saves wait while a cloud sync is running, then go ahead.
 - **Local time everywhere** on screen, including summer time; stored in UTC.
 
-Latest release: **[v0.7.1](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
+Latest release: **[v0.7.2](https://github.com/TyHol/Traccar_QField/releases/latest)** · Changes: [CHANGES.md](CHANGES.md)
 
 ---
 
 ## Install
-<img width="150" height="150" alt="QR code for the v0.7.1 install link" src="install_qr_traccar_qfield-v0.7.1.png" />
+<img width="150" height="150" alt="QR code for the v0.7.2 install link" src="install_qr_traccar_qfield-v0.7.2.png" />
 
 **From a link** — in QField open **Settings → Plugins → Install plugin from URL** and paste:
 
 ```
-https://github.com/TyHol/Traccar_QField/releases/download/v0.7.1/traccar_qfield-v0.7.1.zip
+https://github.com/TyHol/Traccar_QField/releases/download/v0.7.2/traccar_qfield-v0.7.2.zip
 ```
 
-**From a file** — download `traccar_qfield-v0.7.1.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
+**From a file** — download `traccar_qfield-v0.7.2.zip` from the [release page](https://github.com/TyHol/Traccar_QField/releases/latest) and unzip it into QField's `plugins/traccar_qfield` folder (on Windows: `Documents\QField Documents\QField\plugins\`).
 
 Requires a Traccar account (your own server or e.g. `https://server.traccar.org`) and QField 3.3 or later.
 

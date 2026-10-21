@@ -4,7 +4,7 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 
 ---
 
-# v0.7.2 (in development)
+# v0.7.2 — Save geofences, safer sending, Live by default
 
 - **Moving a device you didn't add asks first.** Send point / Add → Point with the name of a device that
   wasn't added from QGIS or QField (a real tracker, say) now asks "This moves '…' — move it?" before
@@ -42,7 +42,7 @@ Summary of improvements made to `main.qml` for potential merge back into the mai
 - Once Traccar accepts a sent point, the plugin **refreshes by itself every 2 s (up to 5 times), Live on
   or off,** until the real device shows. In a time window that ends in the past (custom dates, from
   feature) the point can't appear, so its stand-in goes at once with a note.
-- Tests: 123 checks.
+- Tests: 138 checks.
 
 # v0.7.1 — Phones: fits the screen, tap to add, long-press to send
 
